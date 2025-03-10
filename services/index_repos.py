@@ -9,22 +9,29 @@ import chromadb
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
 
+# Determine the project root directory (one level up from services/)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# Ensure directories exist with absolute paths
+os.makedirs(os.path.join(PROJECT_ROOT, "logs"), exist_ok=True)
+os.makedirs(os.path.join(PROJECT_ROOT, "structured_content"), exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("indexing.log"),
+        logging.FileHandler(os.path.join(PROJECT_ROOT, "logs", "indexing.log")),
         logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger("indexer")
 
 # Load environment variables
-load_dotenv()
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 # Initialize ChromaDB client
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+chroma_client = chromadb.PersistentClient(path=os.path.join(PROJECT_ROOT, "chroma_db"))
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
 # GitHub API configuration
@@ -256,8 +263,8 @@ def index_repository(repo_config):
         
         repo_contents = get_contents(owner, repo, branch)
         
-        # Save structured content for debugging/reference
-        output_filename = f"{name}_structured_content.json"
+        # Save structured content for debugging/reference in structured_content folder
+        output_filename = os.path.join(PROJECT_ROOT, "structured_content", f"{name}_structured_content.json")
         with open(output_filename, 'w', encoding='utf-8') as f:
             json.dump(repo_contents, f, indent=2)
         logger.info(f"Repository contents saved to {output_filename}")
@@ -281,7 +288,8 @@ def cleanup_old_collections():
     """
     try:
         # Get active collections from config
-        with open("config.json", "r") as f:
+        config_path = os.path.join(PROJECT_ROOT, "config.json")
+        with open(config_path, "r") as f:
             config = json.load(f)
         
         repositories = config.get("repositories", [])
@@ -316,7 +324,8 @@ def main():
     logger.info("Starting repository indexing process")
     
     try:
-        with open("config.json", "r") as f:
+        config_path = os.path.join(PROJECT_ROOT, "config.json")
+        with open(config_path, "r") as f:
             config = json.load(f)
     except Exception as e:
         logger.error(f"Failed to load config.json: {str(e)}")

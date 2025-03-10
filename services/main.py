@@ -8,19 +8,25 @@ from tiktoken import encoding_for_model
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 
+# Determine the project root directory (one level up from services/)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# Ensure logs directory exists
+os.makedirs(os.path.join(PROJECT_ROOT, "logs"), exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("server.log"),
+        logging.FileHandler(os.path.join(PROJECT_ROOT, "logs", "server.log")),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger("server")
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 # Initialize OpenAI client
 client = AzureOpenAI(
@@ -30,7 +36,7 @@ client = AzureOpenAI(
 )
 
 # Initialize ChromaDB client
-chroma_client = chromadb.PersistentClient(path="./chroma_db")
+chroma_client = chromadb.PersistentClient(path=os.path.join(PROJECT_ROOT, "chroma_db"))
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
 # Initialize Flask app
@@ -41,7 +47,8 @@ def get_active_collections():
     Get a list of collection names for active repositories from config.json
     """
     try:
-        with open("config.json", "r") as f:
+        config_path = os.path.join(PROJECT_ROOT, "config.json")
+        with open(config_path, "r") as f:
             config = json.load(f)
         
         repositories = config.get("repositories", [])
