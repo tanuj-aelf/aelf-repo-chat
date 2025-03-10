@@ -74,14 +74,14 @@ pip install -r requirements.txt
 
 ```bash
 # Run the indexing script to process repositories defined in config.json
-python index_repos.py
+python3 index_repos.py
 ```
 
 #### Step 2: Start the API server
 
 ```bash
 # Start the API server
-python main.py
+python3 main.py
 ```
 
 ### API Endpoints
