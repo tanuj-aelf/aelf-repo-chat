@@ -1,137 +1,146 @@
 import os
 import json
-import requests
-from urllib.parse import urlparse
+import logging
 import chromadb
-from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from openai import AzureOpenAI
 from tiktoken import encoding_for_model
 from dotenv import load_dotenv
+from flask import Flask, request, jsonify
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("server.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("server")
 
 # Load environment variables from .env file
 load_dotenv()
 
+# Initialize OpenAI client
 client = AzureOpenAI(
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
     api_version=os.getenv("AZURE_OPENAI_API_VERSION")
 )
 
+# Initialize ChromaDB client
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
-
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
-def get_repo_info(repo_url):
+# Initialize Flask app
+app = Flask(__name__)
+
+def get_active_collections():
     """
-    Extract the owner and repository name from the GitHub URL.
+    Get a list of collection names for active repositories from config.json
     """
-    parsed_url = urlparse(repo_url)
-    path_parts = parsed_url.path.strip('/').split('/')
-    if len(path_parts) < 2:
-        raise ValueError("Invalid GitHub repository URL.")
-    owner = path_parts[0]
-    repo = path_parts[1].replace('.git', '')
-    return owner, repo
+    try:
+        with open("config.json", "r") as f:
+            config = json.load(f)
+        
+        repositories = config.get("repositories", [])
+        active_collections = [f"{repo['name']}_collection" for repo in repositories]
+        
+        logger.info(f"Active collections from config: {active_collections}")
+        return active_collections
+    except Exception as e:
+        logger.error(f"Error reading config.json: {str(e)}")
+        # Fall back to getting all collections if config can't be read
+        return get_all_collections()
 
-def get_contents(owner, repo, path=""):
+def get_all_collections():
     """
-    Recursively retrieve the contents of the repository, excluding image and media files.
+    Get a list of all collection names in the database.
     """
-    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-    params = {"ref": "master"}  # You can change the branch if needed
-    response = requests.get(api_url, params=params)
-    response.raise_for_status()
-    items = response.json()
-    contents = []
+    collections = chroma_client.list_collections()
+    collection_names = [collection.name for collection in collections]
+    logger.info(f"All available collections in DB: {collection_names}")
+    return collection_names
 
-    if not isinstance(items, list):
-        items = [items]
-
-    # Exclude image and media formats
-    excluded_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.mp4', '.mp3', '.wav', '.avi', '.mov']
-
-    for item in items:
-        if item['type'] == 'file' and any(item['path'].endswith(ext) for ext in excluded_extensions):
-            continue
-
-        if item['type'] == 'file':
-            file_content = get_file_content(item['download_url'])
-            contents.append({
-                'type': 'file',
-                'path': item['path'],
-                'content': file_content
-            })
-        elif item['type'] == 'dir':
-            dir_contents = get_contents(owner, repo, item['path'])
-            contents.append({
-                'type': 'dir',
-                'path': item['path'],
-                'contents': dir_contents
-            })
-    return contents
-
-
-def get_file_content(download_url):
+def query_vector_db(query, top_k=5):
     """
-    Retrieve the raw content of a file.
+    Query collections in the vector database to retrieve the most relevant documents.
+    Only queries collections from active repositories defined in config.json.
     """
-    response = requests.get(download_url)
-    response.raise_for_status()
-    return response.text
-
-
-def flatten_contents(contents):
-    """
-    Flatten the nested contents into a list of files with paths and contents.
-    """
-    flat_files = []
-
-    def _flatten(items):
-        for item in items:
-            if item['type'] == 'file':
-                flat_files.append({
-                    'path': item['path'],
-                    'content': item['content']
-                })
-            elif item['type'] == 'dir':
-                _flatten(item['contents'])
-
-    _flatten(contents)
-    return flat_files
-
-
-def ingest_into_vector_db(files, collection_name):
-    """
-    Ingest files into the vector database using embeddings.
-    """
-    collection = chroma_client.get_or_create_collection(name=collection_name, embedding_function=default_ef)
-
-    texts = [file['content'] for file in files]
-    metadatas = [{'path': file['path']} for file in files]
-    ids = [file['path'] for file in files]  # Using file paths as IDs
-
-    collection.add(documents=texts, metadatas=metadatas, ids=ids)
-    print(f"Ingested {len(files)} documents into the vector database.")
-
-
-def query_vector_db(query, collection_name, top_k=5):
-    """
-    Query the vector database to retrieve the top_k most relevant documents.
-    """
-    collection = chroma_client.get_or_create_collection(name=collection_name, embedding_function=default_ef)
-    results = collection.query(
-        query_texts=[query],
-        n_results=top_k
-    )
-    # results['documents'] is a list of lists
-    # Flatten it to a single list
-    retrieved_docs = []
-    for doc_list in results['documents']:
-        for doc in doc_list:
-            retrieved_docs.append(doc)
-    return retrieved_docs
-
+    collection_names = get_active_collections()
+    logger.info(f"Querying across {len(collection_names)} collections: {collection_names}")
+    
+    all_docs = []
+    
+    # First pass: get documents from each collection
+    for collection_name in collection_names:
+        try:
+            collection = chroma_client.get_collection(name=collection_name, embedding_function=default_ef)
+            
+            # Query for more documents initially to ensure we get enough candidates
+            collection_top_k = min(top_k * 2, 10)  # Get more candidates but cap at 10
+            
+            results = collection.query(
+                query_texts=[query],
+                n_results=collection_top_k
+            )
+            
+            # Process results and add collection name to metadata
+            for i, doc_list in enumerate(results['documents']):
+                for j, doc in enumerate(doc_list):
+                    # Skip empty documents
+                    if not doc or len(doc.strip()) == 0:
+                        continue
+                        
+                    metadata = results['metadatas'][i][j] if i < len(results['metadatas']) and j < len(results['metadatas'][i]) else {}
+                    metadata['collection'] = collection_name
+                    
+                    # Assign a score based on position (ChromaDB returns in order of relevance)
+                    # First result gets highest score
+                    position_score = 1.0 - (j / collection_top_k if collection_top_k > 0 else 0)
+                    
+                    # Assign a higher base score to documents containing exact keyword matches
+                    keyword_score = 0.0
+                    query_terms = [term.lower() for term in query.split() if len(term) > 3]
+                    doc_lower = doc.lower()
+                    
+                    for term in query_terms:
+                        if term in doc_lower:
+                            keyword_score += 0.2  # Boost for each keyword match
+                    
+                    # Combine scores (position is more important, but keywords can boost)
+                    combined_score = position_score * 0.7 + min(keyword_score, 0.3)
+                    
+                    all_docs.append({
+                        'document': doc,
+                        'metadata': metadata,
+                        'collection': collection_name,
+                        'score': combined_score
+                    })
+            
+            logger.info(f"Retrieved {len(doc_list) if doc_list else 0} documents from {collection_name}")
+        except Exception as e:
+            logger.error(f"Error querying collection {collection_name}: {str(e)}")
+    
+    # Second pass: rank all documents and select the best ones
+    # Sort by combined score (higher is better)
+    all_docs = sorted(all_docs, key=lambda x: x.get('score', 0.0), reverse=True)
+    
+    # Take the top_k overall
+    all_docs = all_docs[:top_k]
+    
+    # Log document sources to help with debugging
+    collection_counts = {}
+    for doc in all_docs:
+        collection = doc.get('collection', 'unknown')
+        collection_counts[collection] = collection_counts.get(collection, 0) + 1
+        
+    sources = [f"{doc.get('collection', 'unknown')}:{doc.get('metadata', {}).get('path', 'unknown')}" for doc in all_docs]
+    logger.info(f"Selected documents: {sources}")
+    logger.info(f"Documents selected by collection: {collection_counts}")
+    logger.info(f"Total documents retrieved across all collections: {len(all_docs)}")
+    return all_docs
 
 def truncate_to_token_limit(text, max_tokens, encoding='gpt-4'):
     """
@@ -144,133 +153,166 @@ def truncate_to_token_limit(text, max_tokens, encoding='gpt-4'):
     truncated_tokens = tokens[:max_tokens]
     return tokenizer.decode(truncated_tokens)
 
-
 def summarize_text(text, max_tokens=200):
     """
     Summarize the text to fit within a limited number of tokens.
+    For very long texts, it first truncates before attempting summarization.
     """
-    prompt = f"Summarize the following text to {max_tokens} tokens:\n\n{text}\n\nSummary:"
-    response = client.chat.completions.create(
-        model="dapp-factory-gpt-4o-westus",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant that summarizes text."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=max_tokens,
-        temperature=0.5
-    )
-    return response.choices[0].message.content.strip()
+    # If text is very long, truncate it first to avoid context length errors
+    # GPT-4o has a context length of ~128K tokens, but we use a much smaller limit for safety
+    max_input_tokens = 12000
+    truncated_text = truncate_to_token_limit(text, max_input_tokens)
+    
+    # If the text is still very large, use a simpler truncation
+    if len(truncated_text) > 15000:  # ~3-4K tokens
+        logger.info(f"Text too long for summarization ({len(truncated_text)} chars), using simple truncation")
+        simple_summary = truncated_text[:5000] + "..."
+        return simple_summary
+    
+    try:
+        prompt = f"Summarize the following text to {max_tokens} tokens. Focus on extracting the key technical information, concepts, and code examples:\n\n{truncated_text}\n\nSummary:"
+        
+        response = client.chat.completions.create(
+            model="dapp-factory-gpt-4o-westus",
+            messages=[
+                {"role": "system", "content": "You are a technical assistant that summarizes documentation and code. Focus on preserving key technical details and code examples."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=max_tokens,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"Error summarizing text: {str(e)}")
+        # Return a truncated version as fallback
+        logger.info("Using fallback truncation for summarization")
+        return truncated_text[:1000] + "..."
 
-
-def generate_gpt4_response(query, context_docs, max_context_tokens=6000):
+def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_response_tokens=4000):
     """
     Generate a response using OpenAI's GPT-4 based on the query and retrieved context documents.
     """
-    # Summarize to reduce token size
-    summarized_contexts = [summarize_text(doc, max_tokens=200) for doc in context_docs]
+    # Combine documents and their metadata
+    enhanced_docs = []
+    for doc in context_docs:
+        try:
+            metadata = doc.get('metadata', {})
+            file_path = metadata.get('path', 'unknown')
+            collection = doc.get('collection', 'unknown')
+            content = doc.get('document', '')
+            
+            enhanced_doc = f"Source: {collection} - {file_path}\n\n{content}"
+            enhanced_docs.append(enhanced_doc)
+        except Exception as e:
+            logger.error(f"Error processing document: {str(e)}")
+    
+    # Summarize long documents
+    summarized_contexts = []
+    for doc in enhanced_docs:
+        if len(doc) > 1500:  # Only summarize long documents
+            summarized = summarize_text(doc, max_tokens=500)
+            summarized_contexts.append(summarized)
+        else:
+            summarized_contexts.append(doc)
 
     # Combine into a single string
-    combined_context = "\n\n".join(summarized_contexts)
+    combined_context = "\n\n---\n\n".join(summarized_contexts)
     
-    # Truncate
+    # Truncate to fit context window
     context = truncate_to_token_limit(combined_context, max_context_tokens)
 
-    prompt = f"""You are an assistant that provides detailed answers based on the following context:
+    system_message = """You are an AI assistant specialized in the aelf blockchain ecosystem. 
+You provide accurate, helpful information based on the context provided.
+When answering:
+1. Cite the source files when referring to specific information
+2. If you don't know or the context doesn't contain the information, admit it
+3. Be concise but thorough
+4. Format code blocks with proper syntax highlighting
+5. Use markdown for better readability"""
 
-
-Context:
+    prompt = f"""Context:
 {context}
 
 Question:
 {query}
 
-Answer:"""
+Answer the question based only on the provided context."""
 
     try:
         response = client.chat.completions.create(
             model="dapp-factory-gpt-4o-westus",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1000,
+            max_tokens=max_response_tokens,
             temperature=0.2
         )
         answer = response.choices[0].message.content.strip()
         return answer
     except Exception as e:
-        print(f"Error generating GPT-4 response: {e}")
+        logger.error(f"Error generating GPT-4 response: {str(e)}")
         return "I'm sorry, I couldn't process your request at the moment."
 
-
-def query_main():
+@app.route('/api/chat', methods=['POST'])
+def chat_endpoint():
     """
-    Main function for querying the vector database.
+    API endpoint for chat functionality.
+    Expects JSON with format: {"query": "your question here", "top_k": 10}
     """
-    collection_name = input("Enter the collection name to query: ").strip()
-    query = input("Enter your query: ").strip()
-    top_k = input("Enter the number of top documents to retrieve (default 5): ").strip()
-    if not top_k.isdigit():
-        top_k = 5
-    else:
-        top_k = int(top_k)
-
-    print("Retrieving relevant documents from the vector database...")
-    retrieved_docs = query_vector_db(query, collection_name, top_k=top_k)
-    print(f"Retrieved {len(retrieved_docs)} documents.")
-
-    # Extract the content from the retrieved documents
-    context_docs = [doc for doc in retrieved_docs]
-
-    print("Generating response using GPT-4...")
-    answer = generate_gpt4_response(query, context_docs)
-    print("\n=== GPT-4 Response ===")
-    print(answer)
-    print("======================\n")
-
+    try:
+        data = request.json
+        if not data or 'query' not in data:
+            return jsonify({"error": "Missing 'query' parameter"}), 400
+        
+        query = data['query']
+        top_k = data.get('top_k', 5)  # Default to 5 if not specified
+        
+        logger.info(f"Received query: {query}")
+        
+        # Retrieve documents from all collections
+        retrieved_docs = query_vector_db(query, top_k=top_k)
+        
+        if not retrieved_docs:
+            return jsonify({
+                "answer": "I couldn't find any relevant information in the repository.",
+                "source_documents": []
+            })
+        
+        # Generate response using GPT-4
+        answer = generate_gpt4_response(query, retrieved_docs)
+        
+        # Format source documents for the response
+        source_documents = []
+        for doc in retrieved_docs:
+            source_documents.append({
+                "content": doc.get('document', '')[:200] + "...",  # Truncated preview
+                "source": doc.get('metadata', {}).get('path', 'unknown'),
+                "collection": doc.get('collection', 'unknown'),
+                "relevance_score": round(doc.get('score', 0.0), 4)  # Use the score directly (already 0-1 scale)
+            })
+        
+        # Log the full response for debugging
+        logger.info(f"Returning answer with {len(source_documents)} source documents")
+        
+        return jsonify({
+            "answer": answer,
+            "source_documents": source_documents
+        })
+    
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 def main():
     """
-    Main function to either ingest data into the vector database or query it.
+    Main function to start the Flask API server.
     """
-    while True:
-        print("Choose an option:")
-        print("1. Ingest GitHub repository into vector database")
-        print("2. Query the vector database")
-        print("3. Exit")
-        choice = input("Enter your choice (1/2/3): ").strip()
-
-        if choice == '1':
-            repo_url = input("Enter the GitHub repository URL: ").strip()
-            try:
-                owner, repo = get_repo_info(repo_url)
-                print(f"Processing repository '{owner}/{repo}'...")
-                repo_contents = get_contents(owner, repo)
-
-                output_filename = f"{repo}_structured_content.json"
-                with open(output_filename, 'w', encoding='utf-8') as f:
-                    json.dump(repo_contents, f, indent=2)
-
-                print(f"Repository contents have been saved to '{output_filename}'.")
-
-                flat_files = flatten_contents(repo_contents)
-                ingest_into_vector_db(flat_files, collection_name=f"{owner}_{repo}_collection")
-
-            except Exception as e:
-                print(f"An error occurred: {e}")
-
-        elif choice == '2':
-            try:
-                query_main()
-            except Exception as e:
-                print(f"An error occurred during querying: {e}")
-
-        elif choice == '3':
-            print("Exiting the program.")
-            break
-
-        else:
-            print("Invalid choice. Please enter 1, 2, or 3.")
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 5000))
+    
+    logger.info(f"Starting aelf-repo-chat API server on {host}:{port}")
+    app.run(host=host, port=port, debug=False)
 
 if __name__ == "__main__":
     main()

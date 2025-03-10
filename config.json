@@ -1,0 +1,14 @@
+{
+  "repositories": [
+    {
+      "url": "https://github.com/tanuj-aelf/nftIndexer",
+      "name": "nftIndexer",
+      "branch": "master"
+    },
+    {
+      "url": "https://github.com/AElfProject/aelf-docs",
+      "name": "aelf-docs",
+      "branch": "develop"
+    }
+  ]
+} 
