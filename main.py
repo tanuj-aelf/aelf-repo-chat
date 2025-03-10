@@ -7,11 +7,15 @@ from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from openai import AzureOpenAI
 from tiktoken import encoding_for_model
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 client = AzureOpenAI(
-    api_key=os.getenv("AZURE_OPENAI_API_KEY", "17tWBuURlhGPwfHyxgWMyVjnOxEU5wtOiDAzTs1wdEuqlmNehzPrJQQJ99BAAC4f1cMXJ3w3AAAAACOG8Y07"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", "https://zhife-m5vtfkd0-westus.services.ai.azure.com/"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION")
 )
 
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -35,7 +39,7 @@ def get_contents(owner, repo, path=""):
     Recursively retrieve the contents of the repository, excluding image and media files.
     """
     api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-    params = {"ref": "dev"}  # You can change the branch if needed
+    params = {"ref": "master"}  # You can change the branch if needed
     response = requests.get(api_url, params=params)
     response.raise_for_status()
     items = response.json()
