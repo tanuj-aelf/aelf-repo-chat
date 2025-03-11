@@ -1,0 +1,21 @@
+Questions for Lark Bot:
+1. How to create an Agent using aevatar-gagents?
+2. Explain the working of aevatar-framework
+3. How to deploy agents using aevatar-station?
+4. What is the architecture of aevatar-framework?
+5. How does the GAgent system work in aevatar-gagents?
+6. What are the main components of aevatar-station?
+7. How do I configure a brain for an AI agent?
+8. What is the relationship between aevatar-framework and aevatar-gagents?
+9. How can I implement a custom GEvent in the aevatar ecosystem?
+10. What authentication mechanisms are used in aevatar-station?
+11. How does event sourcing work in the Orleans test kit?
+12. What are the available plugins in the aevatar framework?
+13. How do I set up a Telegram integration with aevatar-gagents?
+14. What is the purpose of the Router component in aevatar-gagents?
+15. How does the SemanticKernel integration work?
+16. What are the steps to create a ChatAgent?
+17. How does the vector database indexing process work in aelf-repo-chat?
+18. What is the workflow for deploying an agent to production?
+19. How do GAgents communicate with each other?
+20. What are the main differences between aevatar-framework and aevatar-station?

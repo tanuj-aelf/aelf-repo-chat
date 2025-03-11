@@ -72,7 +72,7 @@ def get_all_collections():
     logger.info(f"All available collections in DB: {collection_names}")
     return collection_names
 
-def query_vector_db(query, top_k=5):
+def query_vector_db(query, top_k=10):
     """
     Query collections in the vector database to retrieve the most relevant documents.
     Only queries collections from active repositories defined in config.json.
@@ -308,7 +308,7 @@ def chat_endpoint():
             return jsonify({"error": "Missing 'query' parameter"}), 400
         
         query = data['query']
-        top_k = data.get('top_k', 5)  # Default to 5 if not specified
+        top_k = data.get('top_k', 10)  # Default to 10 if not specified
         
         logger.info(f"Received query: {query}")
         
