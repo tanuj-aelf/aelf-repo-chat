@@ -8,6 +8,7 @@ import base64
 import abc
 import typing as t
 import time
+import threading
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from Crypto.Cipher import AES
@@ -40,33 +41,50 @@ LARK_HOST = os.getenv("LARK_HOST", "https://open.feishu.cn")
 TENANT_ACCESS_TOKEN_URI = "/open-apis/auth/v3/tenant_access_token/internal"
 MESSAGE_URI = "/open-apis/im/v1/messages"
 
-# Initialize a message deduplication cache
-# Format: {message_id: (timestamp, processed_flag)}
-message_cache = {}
-MAX_CACHE_SIZE = 1000
-CACHE_EXPIRY_SECONDS = 300  # 5 minutes
+# Setup simple file-based message deduplication
+PROCESSED_MESSAGES_FILE = os.path.join(PROJECT_ROOT, "logs", "processed_messages.txt")
+# Ensure the directory exists
+os.makedirs(os.path.dirname(PROCESSED_MESSAGES_FILE), exist_ok=True)
+# Ensure the file exists
+if not os.path.exists(PROCESSED_MESSAGES_FILE):
+    open(PROCESSED_MESSAGES_FILE, 'a').close()
 
-# Helper function to clean expired cache entries
-def clean_message_cache():
-    """Remove expired entries from the message cache to prevent memory leaks"""
-    now = time.time()
-    expired_keys = [
-        key for key, (timestamp, _) in message_cache.items()
-        if now - timestamp > CACHE_EXPIRY_SECONDS
-    ]
-    
-    for key in expired_keys:
-        del message_cache[key]
-    
-    # If cache is still too large after removing expired entries,
-    # remove the oldest entries until we're back to a reasonable size
-    if len(message_cache) > MAX_CACHE_SIZE:
-        # Sort by timestamp (oldest first)
-        sorted_keys = sorted(message_cache.keys(), key=lambda k: message_cache[k][0])
-        # Remove oldest entries until we're back to 80% of MAX_CACHE_SIZE
-        keys_to_remove = sorted_keys[:len(message_cache) - int(MAX_CACHE_SIZE * 0.8)]
-        for key in keys_to_remove:
-            del message_cache[key]
+# Simple message cache using a file with one ID per line
+def is_message_processed(message_id):
+    """Check if a message has already been processed by checking a flat file"""
+    try:
+        with open(PROCESSED_MESSAGES_FILE, 'r') as f:
+            processed_ids = [line.strip() for line in f.readlines()]
+            return message_id in processed_ids
+    except Exception as e:
+        logger.error(f"Error checking processed messages: {str(e)}")
+        return False
+
+def mark_message_processed(message_id):
+    """Mark a message as processed by appending its ID to a flat file"""
+    try:
+        with open(PROCESSED_MESSAGES_FILE, 'a') as f:
+            f.write(f"{message_id}\n")
+        # Periodically clean up old messages to keep file size manageable
+        cleanup_processed_messages()
+    except Exception as e:
+        logger.error(f"Error marking message as processed: {str(e)}")
+
+def cleanup_processed_messages():
+    """Keep only the most recent 1000 message IDs to manage file size"""
+    try:
+        # Only clean up if we reach a threshold (to avoid too many file operations)
+        if os.path.getsize(PROCESSED_MESSAGES_FILE) > 100 * 1024:  # 100KB
+            with open(PROCESSED_MESSAGES_FILE, 'r') as f:
+                lines = f.readlines()
+            
+            # Keep only the most recent 1000 lines
+            if len(lines) > 1000:
+                with open(PROCESSED_MESSAGES_FILE, 'w') as f:
+                    f.writelines(lines[-1000:])
+                logger.info(f"Cleaned up processed messages file, kept {min(1000, len(lines))} entries")
+    except Exception as e:
+        logger.error(f"Error cleaning up processed messages: {str(e)}")
 
 #-------------------------------------------------------
 # Utils and Helper Classes (from the original project)
@@ -316,7 +334,7 @@ def init_lark_bot(app):
     # Register URL verification handler
     @event_manager.register("url_verification")
     def request_url_verify_handler(req_data: UrlVerificationEvent):
-        # URL verification, just need to return challenge
+        # url verification, just need return challenge
         if req_data.event.token != VERIFICATION_TOKEN:
             raise InvalidEventException("VERIFICATION_TOKEN is invalid")
         return jsonify({"challenge": req_data.event.challenge})
@@ -336,26 +354,15 @@ def init_lark_bot(app):
         text_content = json.loads(message.content).get("text", "")
         logger.info(f"Received message with ID {message_id} from {open_id}: {text_content}")
         
-        # Check message cache for duplicates
-        now = time.time()
+        # Check if message has already been processed - SIMPLE APPROACH
+        if is_message_processed(message_id):
+            logger.info(f"Duplicate message detected with ID {message_id}, ignoring")
+            return jsonify({"status": "already_processed"})
         
-        # Clean the cache occasionally
-        if len(message_cache) > MAX_CACHE_SIZE / 2:
-            clean_message_cache()
-        
-        # Check if message has been processed before
-        if message_id in message_cache:
-            timestamp, processed = message_cache[message_id]
-            if processed:
-                logger.info(f"Duplicate message detected with ID {message_id}, ignoring")
-                return jsonify({"status": "already_processed"})
-        
-        # Mark message as being processed
-        message_cache[message_id] = (now, False)
+        # Immediately mark the message as processed to prevent duplicate processing
+        mark_message_processed(message_id)
         
         # Set a timeout for the entire handling process
-        import threading
-        
         # Message response timeout
         MAX_PROCESSING_TIME = 60  # 60 seconds max processing time
         processing_complete = False
@@ -470,8 +477,6 @@ def init_lark_bot(app):
                     message_api_client.send_text_with_open_id(open_id, json.dumps({"text": "Sorry, I encountered an error processing your request."}))
                 
                 processing_complete = True
-                # Mark message as processed in the cache
-                message_cache[message_id] = (now, True)
                     
             except requests.Timeout:
                 logger.error("Request to chat API timed out")
@@ -479,8 +484,6 @@ def init_lark_bot(app):
                     "text": "Sorry, it's taking longer than expected to process your request. Please try again or simplify your query."
                 }))
                 processing_failed = True
-                # Mark message as processed to prevent reprocessing
-                message_cache[message_id] = (now, True)
                 
             except Exception as e:
                 logger.error(f"Error processing message: {str(e)}")
@@ -493,8 +496,6 @@ def init_lark_bot(app):
                     logger.error(f"Failed to send error message to user: {str(send_error)}")
                 
                 processing_failed = True
-                # Mark message as processed to prevent reprocessing
-                message_cache[message_id] = (now, True)
         
         # Start message processing in a separate thread
         process_thread = threading.Thread(target=process_message)
@@ -514,9 +515,6 @@ def init_lark_bot(app):
                 }))
             except Exception as e:
                 logger.error(f"Failed to send timeout message: {str(e)}")
-            
-            # Mark as processed even if timed out
-            message_cache[message_id] = (now, True)
         
         # Return a response to Lark regardless of the processing status
         # This ensures the Lark platform knows we received the message
@@ -532,7 +530,7 @@ def init_lark_bot(app):
         )
         return response
 
-    # Register event callback endpoint at both / and /lark/event
+    # Register event callback endpoint
     # The endpoint function that handles Lark bot events
     def handle_lark_event():
         try:
