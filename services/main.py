@@ -7,6 +7,8 @@ from openai import AzureOpenAI
 from tiktoken import encoding_for_model
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
+# Import Lark handler
+from lark_handler import init_lark_bot
 
 # Determine the project root directory (one level up from services/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -200,6 +202,7 @@ def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_res
     Generate a response using OpenAI's GPT-4 based on the query and retrieved context documents.
     """
     # Combine documents and their metadata
+    logger.info(f"Starting to generate GPT-4 response for query: {query[:50]}...")
     enhanced_docs = []
     for doc in context_docs:
         try:
@@ -212,6 +215,8 @@ def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_res
             enhanced_docs.append(enhanced_doc)
         except Exception as e:
             logger.error(f"Error processing document: {str(e)}")
+    
+    logger.info(f"Processed {len(enhanced_docs)} documents for context")
     
     # Summarize long documents
     summarized_contexts = []
@@ -227,6 +232,7 @@ def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_res
     
     # Truncate to fit context window
     context = truncate_to_token_limit(combined_context, max_context_tokens)
+    logger.info(f"Prepared context with {len(context)} characters")
 
     system_message = """You are an AI assistant specialized in the aelf blockchain ecosystem. 
 You provide accurate, helpful information based on the context provided.
@@ -245,21 +251,50 @@ Question:
 
 Answer the question based only on the provided context."""
 
-    try:
-        response = client.chat.completions.create(
-            model="dapp-factory-gpt-4o-westus",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=max_response_tokens,
-            temperature=0.2
-        )
-        answer = response.choices[0].message.content.strip()
-        return answer
-    except Exception as e:
-        logger.error(f"Error generating GPT-4 response: {str(e)}")
-        return "I'm sorry, I couldn't process your request at the moment."
+    # Retry logic for API calls
+    max_retries = 3
+    retry_count = 0
+    backoff_time = 2  # Starting backoff time in seconds
+    
+    while retry_count < max_retries:
+        try:
+            logger.info(f"Sending request to GPT-4 API (attempt {retry_count + 1}/{max_retries})")
+            
+            # Set a timeout for the API call
+            import time
+            start_time = time.time()
+            
+            response = client.chat.completions.create(
+                model="dapp-factory-gpt-4o-westus",
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_response_tokens,
+                temperature=0.2,
+                timeout=60  # 60 second timeout for the API call
+            )
+            
+            elapsed_time = time.time() - start_time
+            logger.info(f"GPT-4 API response received in {elapsed_time:.2f} seconds")
+            
+            answer = response.choices[0].message.content.strip()
+            logger.info(f"Generated response of {len(answer)} characters")
+            return answer
+            
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"Error generating GPT-4 response (attempt {retry_count}/{max_retries}): {str(e)}")
+            
+            if retry_count >= max_retries:
+                # If we've exhausted all retries, return a fallback response
+                logger.warning("All retries exhausted. Returning fallback response.")
+                return "I apologize, but I'm having trouble generating a response at the moment. The system might be experiencing high load or technical issues. Please try again in a few minutes."
+            
+            # Exponential backoff before retry
+            logger.info(f"Retrying in {backoff_time} seconds...")
+            time.sleep(backoff_time)
+            backoff_time *= 2  # Exponential backoff
 
 @app.route('/api/chat', methods=['POST'])
 def chat_endpoint():
@@ -312,13 +347,15 @@ def chat_endpoint():
         return jsonify({"error": str(e)}), 500
 
 def main():
-    """
-    Main function to start the Flask API server.
-    """
+    # Load configuration
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 5000))
     
-    logger.info(f"Starting aelf-repo-chat API server on {host}:{port}")
+    # Initialize Lark bot handler
+    init_lark_bot(app)
+    
+    # Start the Flask app
+    logger.info(f"Starting server on {host}:{port}")
     app.run(host=host, port=port, debug=False)
 
 if __name__ == "__main__":

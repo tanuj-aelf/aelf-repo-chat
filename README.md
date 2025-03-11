@@ -10,13 +10,15 @@ A conversational AI agent that allows users to query and retrieve information fr
 - Provides natural language interface to query repository information through REST API
 - Generates concise, accurate responses using GPT-4
 - Searches across multiple repositories simultaneously
+- Integrates with Lark (Feishu) bot for chat-based interaction
 
 ## Architecture
 
-The application is split into two main components:
+The application is split into three main components:
 
 1. **Indexing Script**: Processes GitHub repositories and stores their content in a vector database
 2. **API Server**: Provides a REST endpoint for querying the indexed repositories
+3. **Lark Bot Handler**: Processes messages from Lark and integrates with the API server
 
 ## Setup and Installation
 
@@ -120,16 +122,55 @@ The application uses environment variables for configuration:
 
 ```
 # Azure OpenAI API Configuration
-AZURE_OPENAI_API_KEY=your_api_key_here
-AZURE_OPENAI_ENDPOINT=your_endpoint_here
-AZURE_OPENAI_API_VERSION=your_api_version_here
+AZURE_OPENAI_API_KEY=your_openai_api_key
+AZURE_OPENAI_ENDPOINT=your_openai_endpoint
+AZURE_OPENAI_API_VERSION=2024-02-15-preview
 
-# GitHub API Token (optional)
-GITHUB_TOKEN=your_github_token_here
+# GitHub API Token
+GITHUB_TOKEN=your_github_token
 
 # Server Configuration
 HOST=0.0.0.0
 PORT=5000
+
+# Lark Bot Configuration
+LARK_APP_ID=your_app_id
+LARK_APP_SECRET=your_app_secret
+LARK_VERIFICATION_TOKEN=your_verification_token
+LARK_ENCRYPT_KEY=your_encrypt_key
+LARK_HOST=https://open.feishu.cn
 ```
 
 Note: The `.env` file is included in `.gitignore` to prevent sensitive information from being committed to the repository.
+
+## Lark Bot Integration
+
+The application includes integration with Lark (Feishu) bots, allowing users to interact with the repository knowledge base directly through Lark chat.
+
+### Setting Up the Lark Bot
+
+1. Create a Custom Bot in the [Lark Developer Console](https://open.feishu.cn/app)
+2. Configure the following permissions for your bot:
+   - `im:message.receive_v1` - For receiving messages
+   - `im:message:send_as_bot` - For sending messages
+
+3. Set up the event subscription URL to point to your server's endpoint:
+   ```
+   https://your-server-domain/lark/event
+   ```
+
+4. Get your Lark bot credentials and update your `.env` file:
+   - `LARK_APP_ID` - From the bot's app credentials
+   - `LARK_APP_SECRET` - From the bot's app credentials
+   - `LARK_VERIFICATION_TOKEN` - Token for verifying event subscriptions
+   - `LARK_ENCRYPT_KEY` - Key for encrypting/decrypting messages (if encryption is enabled)
+
+5. Start your server, and the bot will be able to receive messages and respond with information from your aelf repositories.
+
+### Using the Lark Bot
+
+Once set up, users can interact with the bot by:
+
+1. Finding the bot in Lark and starting a conversation
+2. Asking questions about aelf repositories
+3. The bot will process the query, search across indexed repositories, and respond with relevant information

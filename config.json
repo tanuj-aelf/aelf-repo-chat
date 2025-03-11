@@ -1,14 +1,19 @@
 {
   "repositories": [
     {
-      "url": "https://github.com/tanuj-aelf/nftIndexer",
-      "name": "nftIndexer",
-      "branch": "master"
+      "url": "https://github.com/aevatarAI/aevatar-framework",
+      "name": "aevatar-framework",
+      "branch": "dev"
     },
     {
-      "url": "https://github.com/AElfProject/aelf-docs",
-      "name": "aelf-docs",
-      "branch": "develop"
+      "url": "https://github.com/aevatarAI/aevatar-station",
+      "name": "aevatar-station",
+      "branch": "dev"
+    },
+    {
+      "url": "https://github.com/aevatarAI/aevatar-gagents",
+      "name": "aevatar-gagents",
+      "branch": "dev"
     }
   ]
-} 
+}
