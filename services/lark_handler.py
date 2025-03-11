@@ -7,6 +7,7 @@ import hashlib
 import base64
 import abc
 import typing as t
+import time
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from Crypto.Cipher import AES
@@ -38,6 +39,34 @@ LARK_HOST = os.getenv("LARK_HOST", "https://open.feishu.cn")
 # Constants for API endpoints
 TENANT_ACCESS_TOKEN_URI = "/open-apis/auth/v3/tenant_access_token/internal"
 MESSAGE_URI = "/open-apis/im/v1/messages"
+
+# Initialize a message deduplication cache
+# Format: {message_id: (timestamp, processed_flag)}
+message_cache = {}
+MAX_CACHE_SIZE = 1000
+CACHE_EXPIRY_SECONDS = 300  # 5 minutes
+
+# Helper function to clean expired cache entries
+def clean_message_cache():
+    """Remove expired entries from the message cache to prevent memory leaks"""
+    now = time.time()
+    expired_keys = [
+        key for key, (timestamp, _) in message_cache.items()
+        if now - timestamp > CACHE_EXPIRY_SECONDS
+    ]
+    
+    for key in expired_keys:
+        del message_cache[key]
+    
+    # If cache is still too large after removing expired entries,
+    # remove the oldest entries until we're back to a reasonable size
+    if len(message_cache) > MAX_CACHE_SIZE:
+        # Sort by timestamp (oldest first)
+        sorted_keys = sorted(message_cache.keys(), key=lambda k: message_cache[k][0])
+        # Remove oldest entries until we're back to 80% of MAX_CACHE_SIZE
+        keys_to_remove = sorted_keys[:len(message_cache) - int(MAX_CACHE_SIZE * 0.8)]
+        for key in keys_to_remove:
+            del message_cache[key]
 
 #-------------------------------------------------------
 # Utils and Helper Classes (from the original project)
@@ -303,12 +332,29 @@ def init_lark_bot(app):
             
         # Get open_id and text_content
         open_id = sender_id.open_id
+        message_id = message.message_id  # Get the message ID for deduplication
         text_content = json.loads(message.content).get("text", "")
-        logger.info(f"Received message from {open_id}: {text_content}")
+        logger.info(f"Received message with ID {message_id} from {open_id}: {text_content}")
+        
+        # Check message cache for duplicates
+        now = time.time()
+        
+        # Clean the cache occasionally
+        if len(message_cache) > MAX_CACHE_SIZE / 2:
+            clean_message_cache()
+        
+        # Check if message has been processed before
+        if message_id in message_cache:
+            timestamp, processed = message_cache[message_id]
+            if processed:
+                logger.info(f"Duplicate message detected with ID {message_id}, ignoring")
+                return jsonify({"status": "already_processed"})
+        
+        # Mark message as being processed
+        message_cache[message_id] = (now, False)
         
         # Set a timeout for the entire handling process
         import threading
-        import time
         
         # Message response timeout
         MAX_PROCESSING_TIME = 60  # 60 seconds max processing time
@@ -346,9 +392,72 @@ def init_lark_bot(app):
                     # Format sources for display
                     sources = response_data.get("source_documents", [])
                     if sources:
-                        source_text = "\n\nSources:\n"
+                        source_text = "\n\n**Sources:**\n"
+                        
+                        # GitHub URLs and repository information
+                        github_base_url = "https://github.com"
+                        default_owner = os.getenv("GITHUB_DEFAULT_OWNER", "AElfProject")
+                        default_branch = os.getenv("GITHUB_DEFAULT_BRANCH", "main")
+                        
                         for i, source in enumerate(sources[:3], 1):  # Limit to top 3 sources
-                            source_text += f"{i}. {source.get('source', 'unknown')} (relevance: {source.get('relevance_score', 0)})\n"
+                            file_path = source.get('source', 'unknown')
+                            collection = source.get('collection', 'unknown')
+                            relevance = source.get('relevance_score', 0)
+                            
+                            # Extract repository name from collection name
+                            # Collection name format is typically "{repo-name}_collection"
+                            repo_name = collection.replace("_collection", "") if collection.endswith("_collection") else collection
+                            
+                            # Read repository configuration to get correct branch
+                            branch = default_branch
+                            owner = default_owner
+                            
+                            try:
+                                # Try to get repository configuration from config.json
+                                config_path = os.path.join(PROJECT_ROOT, "config.json")
+                                if os.path.exists(config_path):
+                                    with open(config_path, "r") as f:
+                                        config = json.load(f)
+                                    
+                                    # Find the repository in config
+                                    repositories = config.get("repositories", [])
+                                    for repo in repositories:
+                                        if repo.get("name", "") == repo_name:
+                                            # Use specified branch if available
+                                            branch = repo.get("branch", default_branch)
+                                            # Check if owner is specified in the URL
+                                            repo_url = repo.get("url", "")
+                                            if repo_url.startswith("https://github.com/"):
+                                                url_parts = repo_url.replace("https://github.com/", "").split("/")
+                                                if len(url_parts) >= 1:
+                                                    owner = url_parts[0]
+                            except Exception as e:
+                                logger.warning(f"Error reading repository configuration: {str(e)}")
+                            
+                            # Handle repo names that might include owner (e.g., "owner-repo")
+                            if "-" in repo_name and owner == default_owner:  # Only try to extract if we're using the default owner
+                                parts = repo_name.split("-", 1)
+                                # Only consider it an owner-repo format if it's likely
+                                if len(parts) == 2 and len(parts[0]) > 2:
+                                    # This might be in the format "owner-repo"
+                                    # For example "aevatar-gagents" where "aevatar" could be the owner
+                                    potential_owner = parts[0]
+                                    potential_repo = parts[1]
+                                    
+                                    # If it's a known organization name, use it as owner
+                                    known_orgs = ["aelf", "aevatar", "AElfProject"]
+                                    if potential_owner.lower() in [org.lower() for org in known_orgs]:
+                                        owner = potential_owner
+                                        repo_name = potential_repo
+                            
+                            # Construct GitHub URL
+                            github_url = f"{github_base_url}/{owner}/{repo_name}/blob/{branch}/{file_path}"
+                            
+                            # Format as markdown link for Lark
+                            # Use formatted relevance score with 2 decimal places
+                            formatted_relevance = f"{relevance:.2f}" if isinstance(relevance, float) else str(relevance)
+                            source_text += f"{i}. [{file_path}]({github_url}) (relevance: {formatted_relevance})\n"
+                        
                         answer += source_text
                     
                     # Send the response back to the user via Lark
@@ -361,6 +470,8 @@ def init_lark_bot(app):
                     message_api_client.send_text_with_open_id(open_id, json.dumps({"text": "Sorry, I encountered an error processing your request."}))
                 
                 processing_complete = True
+                # Mark message as processed in the cache
+                message_cache[message_id] = (now, True)
                     
             except requests.Timeout:
                 logger.error("Request to chat API timed out")
@@ -368,6 +479,8 @@ def init_lark_bot(app):
                     "text": "Sorry, it's taking longer than expected to process your request. Please try again or simplify your query."
                 }))
                 processing_failed = True
+                # Mark message as processed to prevent reprocessing
+                message_cache[message_id] = (now, True)
                 
             except Exception as e:
                 logger.error(f"Error processing message: {str(e)}")
@@ -380,6 +493,8 @@ def init_lark_bot(app):
                     logger.error(f"Failed to send error message to user: {str(send_error)}")
                 
                 processing_failed = True
+                # Mark message as processed to prevent reprocessing
+                message_cache[message_id] = (now, True)
         
         # Start message processing in a separate thread
         process_thread = threading.Thread(target=process_message)
@@ -399,6 +514,9 @@ def init_lark_bot(app):
                 }))
             except Exception as e:
                 logger.error(f"Failed to send timeout message: {str(e)}")
+            
+            # Mark as processed even if timed out
+            message_cache[message_id] = (now, True)
         
         # Return a response to Lark regardless of the processing status
         # This ensures the Lark platform knows we received the message
