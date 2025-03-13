@@ -3,12 +3,15 @@ import json
 import logging
 import chromadb
 from chromadb.utils import embedding_functions
-from openai import AzureOpenAI
 from tiktoken import encoding_for_model
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 # Import Lark handler
 from lark_handler import init_lark_bot
+# Import repository summarizer
+from repo_summarizer import get_formatted_repo_summaries
+# Import model configuration
+from model_config import get_model_client, generate_completion
 
 # Determine the project root directory (one level up from services/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -30,12 +33,11 @@ logger = logging.getLogger("server")
 # Load environment variables from .env file
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
-# Initialize OpenAI client
-client = AzureOpenAI(
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION")
-)
+# Initialize model client
+client = get_model_client({
+    "temperature": 0.2,
+    "timeout": 60
+})
 
 # Initialize ChromaDB client
 chroma_client = chromadb.PersistentClient(path=os.path.join(PROJECT_ROOT, "chroma_db"))
@@ -188,16 +190,16 @@ def summarize_text(text, max_tokens=200):
     try:
         prompt = f"Summarize the following text to {max_tokens} tokens. Focus on extracting the key technical information, concepts, and code examples:\n\n{truncated_text}\n\nSummary:"
         
-        response = client.chat.completions.create(
-            model="dapp-factory-gpt-4o-westus",
-            messages=[
-                {"role": "system", "content": "You are a technical assistant that summarizes documentation and code. Focus on preserving key technical details and code examples."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=max_tokens,
-            temperature=0.3
+        system_message = "You are a technical assistant that summarizes documentation and code. Focus on preserving key technical details and code examples."
+        
+        return generate_completion(
+            prompt,
+            system_message=system_message,
+            config={
+                "max_tokens": max_tokens,
+                "temperature": 0.3
+            }
         )
-        return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"Error summarizing text: {str(e)}")
         # Return a truncated version as fallback
@@ -206,10 +208,15 @@ def summarize_text(text, max_tokens=200):
 
 def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_response_tokens=4000):
     """
-    Generate a response using OpenAI's GPT-4 based on the query and retrieved context documents.
+    Generate a response using the configured model based on the query and retrieved context documents.
     """
     # Combine documents and their metadata
-    logger.info(f"Starting to generate GPT-4 response for query: {query[:50]}...")
+    logger.info(f"Starting to generate LLM response for query: {query[:50]}...")
+    
+    # Get repository summaries
+    repo_summaries = get_formatted_repo_summaries()
+    logger.info(f"Retrieved repository summaries ({len(repo_summaries)} characters)")
+    
     enhanced_docs = []
     for doc in context_docs:
         try:
@@ -243,18 +250,34 @@ def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_res
     # Combine into a single string
     combined_context = "\n\n---\n\n".join(summarized_contexts)
     
-    # Truncate to fit context window
-    context = truncate_to_token_limit(combined_context, max_context_tokens)
-    logger.info(f"Prepared context with {len(context)} characters")
+    # Set aside tokens for the repository summaries and calculate remaining tokens for the context
+    summary_token_estimate = len(repo_summaries) // 4  # Rough estimate: 4 characters per token
+    remaining_context_tokens = max(1000, max_context_tokens - min(2000, summary_token_estimate))
+    
+    # Truncate context to fit within token limit
+    truncated_context = truncate_to_token_limit(combined_context, remaining_context_tokens)
+    
+    # Combine repository summaries with context
+    full_context = f"""REPOSITORY OVERVIEW:
+{repo_summaries}
+
+RELEVANT DOCUMENT CHUNKS:
+{truncated_context}"""
+    
+    # Final check to ensure we're within the limit
+    context = truncate_to_token_limit(full_context, max_context_tokens)
+    logger.info(f"Prepared context with {len(context)} characters (including repository summaries)")
 
     system_message = """You are an AI assistant specialized in the aelf blockchain ecosystem. 
 You provide accurate, helpful information based on the context provided.
 When answering:
-1. Cite the source files when referring to specific information
-2. If you don't know or the context doesn't contain the information, admit it
-3. Be concise but thorough
-4. Format code blocks with proper syntax highlighting
-5. Use markdown for better readability"""
+1. First, review the repository overview to understand the broader context and purpose of each repository
+2. Then use the specific document chunks to answer the question in detail
+3. Cite the source files when referring to specific information
+4. If you don't know or the context doesn't contain the information, admit it
+5. Be concise but thorough
+6. Format code blocks with proper syntax highlighting
+7. Use markdown for better readability"""
 
     prompt = f"""Context:
 {context}
@@ -271,33 +294,31 @@ Answer the question based only on the provided context."""
     
     while retry_count < max_retries:
         try:
-            logger.info(f"Sending request to GPT-4 API (attempt {retry_count + 1}/{max_retries})")
+            logger.info(f"Sending request to LLM API (attempt {retry_count + 1}/{max_retries})")
             
             # Set a timeout for the API call
             import time
             start_time = time.time()
             
-            response = client.chat.completions.create(
-                model="dapp-factory-gpt-4o-westus",
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=max_response_tokens,
-                temperature=0.2,
-                timeout=60  # 60 second timeout for the API call
+            answer = generate_completion(
+                prompt,
+                system_message=system_message,
+                config={
+                    "max_tokens": max_response_tokens,
+                    "temperature": 0.2,
+                    "timeout": 60  # 60 second timeout for the API call
+                }
             )
             
             elapsed_time = time.time() - start_time
-            logger.info(f"GPT-4 API response received in {elapsed_time:.2f} seconds")
+            logger.info(f"LLM API response received in {elapsed_time:.2f} seconds")
             
-            answer = response.choices[0].message.content.strip()
             logger.info(f"Generated response of {len(answer)} characters")
             return answer
             
         except Exception as e:
             retry_count += 1
-            logger.error(f"Error generating GPT-4 response (attempt {retry_count}/{max_retries}): {str(e)}")
+            logger.error(f"Error generating LLM response (attempt {retry_count}/{max_retries}): {str(e)}")
             
             if retry_count >= max_retries:
                 # If we've exhausted all retries, return a fallback response

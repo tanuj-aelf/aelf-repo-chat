@@ -27,6 +27,7 @@ Thumbs.db
 
 # Repository content files
 structured_content/*
+repo_summaries/*
 
 # Logs
 logs/*
