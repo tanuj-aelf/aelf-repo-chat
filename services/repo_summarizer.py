@@ -3,8 +3,9 @@ import json
 import logging
 import requests
 from urllib.parse import urlparse
-from openai import AzureOpenAI
 from dotenv import load_dotenv
+# Import model configuration
+from model_config import generate_completion
 
 # Determine the project root directory (one level up from services/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -14,13 +15,6 @@ logger = logging.getLogger("repo_summarizer")
 
 # Load environment variables
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
-
-# Initialize OpenAI client
-client = AzureOpenAI(
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION")
-)
 
 # Directory for storing repository summaries
 SUMMARIES_DIR = os.path.join(PROJECT_ROOT, "repo_summaries")
@@ -125,7 +119,7 @@ def generate_repo_summary(repo_config):
             "readme_content": readme
         }
         
-        # Use GPT-4 to generate a concise, technical summary
+        # Use the model to generate a concise, technical summary
         if readme:
             prompt = f"""
 Please create a concise technical summary of this repository based on its README file and metadata.
@@ -148,19 +142,20 @@ README Content:
 Generate a structured technical summary in markdown format, maximum 500 words.
 """
             try:
-                response = client.chat.completions.create(
-                    model="dapp-factory-gpt-4o-westus",
-                    messages=[
-                        {"role": "system", "content": "You are a technical analyst who specializes in creating concise, accurate summaries of software repositories. Focus on technical details and architecture."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=1500,
-                    temperature=0.3
+                system_message = "You are a technical analyst who specializes in creating concise, accurate summaries of software repositories. Focus on technical details and architecture."
+                
+                generated_summary = generate_completion(
+                    prompt,
+                    system_message=system_message,
+                    config={
+                        "max_tokens": 1500,
+                        "temperature": 0.3
+                    }
                 )
-                generated_summary = response.choices[0].message.content.strip()
+                
                 summary["generated_summary"] = generated_summary
             except Exception as e:
-                logger.error(f"Error generating GPT-4 summary: {str(e)}")
+                logger.error(f"Error generating summary: {str(e)}")
                 summary["generated_summary"] = "Error generating summary"
         
         # Save the summary
