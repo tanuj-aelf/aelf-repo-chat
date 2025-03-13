@@ -138,11 +138,17 @@ def get_contents(owner, repo, branch="master", path=""):
 
     # Exclude image and media formats
     excluded_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.mp4', '.mp3', '.wav', '.avi', '.mov']
+    # Exclude specific files
+    excluded_files = ['README.md', 'readme.md', 'Readme.md']
 
     for item in items:
         try:
-            if item['type'] == 'file' and any(item['path'].endswith(ext) for ext in excluded_extensions):
-                logger.debug(f"Skipping media file: {item['path']}")
+            # Skip excluded files
+            if item['type'] == 'file' and (
+                any(item['path'].endswith(ext) for ext in excluded_extensions) or
+                any(item['name'] == excluded_file for excluded_file in excluded_files)
+            ):
+                logger.debug(f"Skipping excluded file: {item['path']}")
                 continue
 
             if item['type'] == 'file':

@@ -103,6 +103,13 @@ def query_vector_db(query, top_k=10):
                         continue
                         
                     metadata = results['metadatas'][i][j] if i < len(results['metadatas']) and j < len(results['metadatas'][i]) else {}
+                    file_path = metadata.get('path', '')
+                    
+                    # Skip README.md files
+                    if file_path.lower().endswith('readme.md'):
+                        logger.debug(f"Skipping README file: {file_path}")
+                        continue
+                    
                     metadata['collection'] = collection_name
                     
                     # Assign a score based on position (ChromaDB returns in order of relevance)
@@ -208,6 +215,12 @@ def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_res
         try:
             metadata = doc.get('metadata', {})
             file_path = metadata.get('path', 'unknown')
+            
+            # Skip README.md files (as a safety check)
+            if file_path.lower().endswith('readme.md'):
+                logger.debug(f"Skipping README file from context: {file_path}")
+                continue
+                
             collection = doc.get('collection', 'unknown')
             content = doc.get('document', '')
             
