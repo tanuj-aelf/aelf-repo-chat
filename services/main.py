@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 # Import Lark handler
 from lark_handler import init_lark_bot
+# Import repository summarizer
+from repo_summarizer import get_formatted_repo_summaries
 
 # Determine the project root directory (one level up from services/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -210,6 +212,11 @@ def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_res
     """
     # Combine documents and their metadata
     logger.info(f"Starting to generate GPT-4 response for query: {query[:50]}...")
+    
+    # Get repository summaries
+    repo_summaries = get_formatted_repo_summaries()
+    logger.info(f"Retrieved repository summaries ({len(repo_summaries)} characters)")
+    
     enhanced_docs = []
     for doc in context_docs:
         try:
@@ -243,18 +250,34 @@ def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_res
     # Combine into a single string
     combined_context = "\n\n---\n\n".join(summarized_contexts)
     
-    # Truncate to fit context window
-    context = truncate_to_token_limit(combined_context, max_context_tokens)
-    logger.info(f"Prepared context with {len(context)} characters")
+    # Set aside tokens for the repository summaries and calculate remaining tokens for the context
+    summary_token_estimate = len(repo_summaries) // 4  # Rough estimate: 4 characters per token
+    remaining_context_tokens = max(1000, max_context_tokens - min(2000, summary_token_estimate))
+    
+    # Truncate context to fit within token limit
+    truncated_context = truncate_to_token_limit(combined_context, remaining_context_tokens)
+    
+    # Combine repository summaries with context
+    full_context = f"""REPOSITORY OVERVIEW:
+{repo_summaries}
+
+RELEVANT DOCUMENT CHUNKS:
+{truncated_context}"""
+    
+    # Final check to ensure we're within the limit
+    context = truncate_to_token_limit(full_context, max_context_tokens)
+    logger.info(f"Prepared context with {len(context)} characters (including repository summaries)")
 
     system_message = """You are an AI assistant specialized in the aelf blockchain ecosystem. 
 You provide accurate, helpful information based on the context provided.
 When answering:
-1. Cite the source files when referring to specific information
-2. If you don't know or the context doesn't contain the information, admit it
-3. Be concise but thorough
-4. Format code blocks with proper syntax highlighting
-5. Use markdown for better readability"""
+1. First, review the repository overview to understand the broader context and purpose of each repository
+2. Then use the specific document chunks to answer the question in detail
+3. Cite the source files when referring to specific information
+4. If you don't know or the context doesn't contain the information, admit it
+5. Be concise but thorough
+6. Format code blocks with proper syntax highlighting
+7. Use markdown for better readability"""
 
     prompt = f"""Context:
 {context}

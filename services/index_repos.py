@@ -8,6 +8,8 @@ import requests
 import chromadb
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
+# Import the repository summarizer
+from repo_summarizer import generate_repo_summary, generate_all_repo_summaries
 
 # Determine the project root directory (one level up from services/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -282,6 +284,17 @@ def index_repository(repo_config):
         collection_name = f"{name}_collection"
         docs_ingested = ingest_into_vector_db(flat_files, collection_name)
         
+        # Generate repository summary
+        try:
+            logger.info(f"Generating summary for repository: {name}")
+            summary = generate_repo_summary(repo_config)
+            if summary:
+                logger.info(f"Successfully generated summary for {name}")
+            else:
+                logger.warning(f"Failed to generate summary for {name}")
+        except Exception as e:
+            logger.error(f"Error generating summary for {name}: {str(e)}")
+        
         logger.info(f"Successfully indexed {docs_ingested} documents from {name} into {collection_name}")
         return True
     except Exception as e:
@@ -357,6 +370,14 @@ def main():
         success = index_repository(repo_config)
         if success:
             success_count += 1
+    
+    # Generate a combined summary file for all repositories
+    try:
+        logger.info("Generating combined summary file for all repositories")
+        generate_all_repo_summaries()
+        logger.info("Successfully generated combined summary file")
+    except Exception as e:
+        logger.error(f"Error generating combined summary file: {str(e)}")
     
     logger.info(f"Indexing complete. Successfully indexed {success_count} out of {len(repositories)} repositories.")
 
