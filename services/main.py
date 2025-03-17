@@ -36,7 +36,7 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 # Initialize model client
 client = get_model_client({
     "temperature": 0.2,
-    "timeout": 60
+    "timeout": 150
 })
 
 # Initialize ChromaDB client
@@ -306,7 +306,7 @@ Answer the question based only on the provided context."""
                 config={
                     "max_tokens": max_response_tokens,
                     "temperature": 0.2,
-                    "timeout": 60  # 60 second timeout for the API call
+                    "timeout": 150  # 60 second timeout for the API call
                 }
             )
             

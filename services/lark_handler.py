@@ -364,7 +364,7 @@ def init_lark_bot(app):
         
         # Set a timeout for the entire handling process
         # Message response timeout
-        MAX_PROCESSING_TIME = 60  # 60 seconds max processing time
+        MAX_PROCESSING_TIME = 150  # 150 seconds max processing time
         processing_complete = False
         processing_failed = False
         
@@ -386,7 +386,7 @@ def init_lark_bot(app):
                     f"http://{host}:{port}/api/chat", 
                     headers=headers, 
                     json=payload,
-                    timeout=50  # 50 second timeout (less than the overall process timeout)
+                    timeout=150  # 150 second timeout (less than the overall process timeout)
                 )
                 
                 logger.info(f"Received response from chat API: status={response.status_code}")
