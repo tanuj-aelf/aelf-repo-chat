@@ -126,6 +126,13 @@ def extract_key_files_from_structured_content(structured_content, important_file
             r".*Service\.cs$",
             r".*Controller\.cs$",
             r".*Interface\.cs$",
+            r".*Base\.cs$",   # Base classes are often important for understanding inheritance patterns
+            r".*Factory\.cs$", # Factory patterns are important for understanding object creation
+            r".*Repository\.cs$", # Repository patterns for data access
+            r".*Manager\.cs$",  # Manager classes often contain key business logic
+            r".*Handler\.cs$",  # Handler classes often contain important event/command handling
+            r".*Client\.cs$",   # Client classes for external communication
+            r".*Provider\.cs$", # Provider classes often implement key functionality
             r".*\.props$",
             r".*\.sln$"
         ]
@@ -158,12 +165,12 @@ def extract_modules_from_structured_content(structured_content):
     Extract potential modules or components from the structured content.
     
     Returns:
-        A list of module/component names
+        A list of dictionaries with module information
     """
     if not structured_content:
         return []
     
-    modules = []
+    modules_info = []
     
     # Look for src directory
     for item in structured_content:
@@ -172,10 +179,49 @@ def extract_modules_from_structured_content(structured_content):
             if "contents" in item:
                 for subitem in item.get("contents", []):
                     if subitem.get("type") == "dir":
-                        modules.append(subitem.get("path", "").split("/")[-1])
+                        module_name = subitem.get("path", "").split("/")[-1]
+                        
+                        # Find key files within the module to gather more information
+                        module_description = ""
+                        key_classes = []
+                        interfaces = []
+                        
+                        # Extract key files from the module directory
+                        if "contents" in subitem:
+                            for file_item in subitem.get("contents", []):
+                                if file_item.get("type") == "file" and file_item.get("path", "").endswith(".cs"):
+                                    file_path = file_item.get("path", "")
+                                    file_name = file_path.split("/")[-1]
+                                    
+                                    # Look for key indicator files that can help understand the module's purpose
+                                    file_content = file_item.get("content", "")
+                                    if file_name.endswith("Base.cs") or "Interface.cs" in file_name:
+                                        # Extract class definitions
+                                        class_match = re.search(r'class\s+(\w+)', file_content)
+                                        if class_match:
+                                            key_classes.append(class_match.group(1))
+                                            
+                                        # Extract interface definitions
+                                        interface_match = re.search(r'interface\s+(\w+)', file_content)
+                                        if interface_match:
+                                            interfaces.append(interface_match.group(1))
+                                    
+                                    # Extract summary comments that might describe the purpose
+                                    summary_match = re.search(r'///\s*<summary>(.*?)</summary>', file_content, re.DOTALL)
+                                    if summary_match and not module_description:
+                                        module_description = summary_match.group(1).strip()
+                        
+                        # Create module info dictionary
+                        module_info = {
+                            "name": module_name,
+                            "description": module_description,
+                            "key_classes": key_classes,
+                            "interfaces": interfaces
+                        }
+                        modules_info.append(module_info)
             break
     
-    return modules
+    return modules_info
 
 def fetch_repo_structure(owner, repo, path="", max_depth=2, current_depth=0):
     """
@@ -217,6 +263,49 @@ def fetch_repo_structure(owner, repo, path="", max_depth=2, current_depth=0):
         logger.error(f"Error fetching repo structure for {path}: {str(e)}")
         return []
 
+def extract_class_hierarchies(structured_content):
+    """
+    Extract class inheritance hierarchies to understand extension points
+    
+    Returns:
+        A dictionary mapping base classes to their known subclasses
+    """
+    if not structured_content:
+        return {}
+    
+    # Simple regex to find class declarations and inheritance
+    class_regex = re.compile(r'class\s+(\w+)(?:\s*:\s*(\w+))?')
+    
+    class_hierarchy = {}
+    
+    def process_file_content(content):
+        if not content:
+            return
+            
+        matches = class_regex.findall(content)
+        for match in matches:
+            class_name, base_class = match
+            if base_class and base_class.strip():
+                if base_class not in class_hierarchy:
+                    class_hierarchy[base_class] = []
+                if class_name not in class_hierarchy[base_class]:
+                    class_hierarchy[base_class].append(class_name)
+    
+    def extract_from_files(items):
+        if not items or not isinstance(items, list):
+            return
+            
+        for item in items:
+            if item.get("type") == "file":
+                file_path = item.get("path", "")
+                if file_path.endswith(".cs"):
+                    process_file_content(item.get("content", ""))
+            elif item.get("type") == "dir" and "contents" in item:
+                extract_from_files(item.get("contents", []))
+    
+    extract_from_files(structured_content)
+    return class_hierarchy
+
 def generate_repo_summary(repo_config):
     """
     Generate a comprehensive summary for a repository.
@@ -247,21 +336,37 @@ def generate_repo_summary(repo_config):
             # Extract important files and their contents
             key_files = extract_key_files_from_structured_content(structured_content)
             
+            # Extract class hierarchy information
+            class_hierarchies = extract_class_hierarchies(structured_content)
+            
             # No need to fetch repository structure if we have structured content
             repo_structure = []
         else:
             # If structured content doesn't exist, fallback to fetching repo structure from GitHub API
             repo_structure = fetch_repo_structure(owner, repo, max_depth=1)
-            modules = []
-            key_files = []
             
             # Extract src directories to identify potential modules/components from API
+            module_names = []
             for item in repo_structure:
                 if item.get("type") == "dir" and item.get("name", "").lower() in ["src", "source", "lib"]:
                     # Try to get subdirectories of src to identify modules
                     src_content = fetch_repo_structure(owner, repo, item.get("path", ""), max_depth=0)
-                    modules = [sub.get("name", "") for sub in src_content if sub.get("type") == "dir"]
+                    module_names = [sub.get("name", "") for sub in src_content if sub.get("type") == "dir"]
                     break
+            
+            # Create simple module info objects since we don't have detailed information
+            modules = []
+            for name in module_names:
+                if name:
+                    modules.append({
+                        "name": name,
+                        "description": "",
+                        "key_classes": [],
+                        "interfaces": []
+                    })
+            
+            key_files = []
+            class_hierarchies = {}
         
         # Create a structured summary with all available information
         summary = {
@@ -280,7 +385,7 @@ def generate_repo_summary(repo_config):
                 "license": metadata.get("license", {}).get("name", "Unknown")
             },
             "readme_content": readme,
-            "modules": modules
+            "modules": [module_info["name"] for module_info in modules]
         }
         
         # Add structure if we fetched it from API
@@ -300,8 +405,35 @@ def generate_repo_summary(repo_config):
                     content_preview = content[:2000] + "..." if len(content) > 2000 else content
                     file_contents_for_prompt += f"\n\n## File: {file_path}\n```\n{content_preview}\n```"
             
+            # Prepare class hierarchy information for the prompt
+            class_hierarchy_for_prompt = ""
+            if class_hierarchies:
+                class_hierarchy_for_prompt = "\n\nClass Hierarchies and Extension Points:\n"
+                for base_class, subclasses in class_hierarchies.items():
+                    if subclasses:
+                        class_hierarchy_for_prompt += f"- {base_class}: Extended by {', '.join(subclasses)}\n"
+            
+            # Prepare module information for the prompt
+            modules_for_prompt = ""
+            if modules:
+                modules_for_prompt = "\nModules/Components:\n"
+                for module_info in modules:
+                    module_name = module_info["name"]
+                    description = module_info["description"] if module_info["description"] else "No description available"
+                    
+                    # Add key classes and interfaces if available
+                    additional_info = ""
+                    if module_info.get("key_classes", []):
+                        additional_info += f"\n  - Key Classes: {', '.join(module_info['key_classes'])}"
+                    if module_info.get("interfaces", []):
+                        additional_info += f"\n  - Interfaces: {', '.join(module_info['interfaces'])}"
+                    
+                    modules_for_prompt += f"- {module_name}: {description}{additional_info}\n"
+            else:
+                modules_for_prompt = "\nModules/Components: No clear modules identified"
+            
             prompt = f"""
-Please create a concise technical summary of this repository based on its README file, important source code files, and metadata.
+Please create a detailed technical summary of this repository based on its important source code files and metadata.
 Focus on extracting:
 
 1. The purpose and primary functionality of the project
@@ -313,26 +445,45 @@ Focus on extracting:
 7. Integration points with other systems
 8. Important dependencies and technologies used
 
+Additionally, provide detailed information on:
+9. Implementation patterns and how to use key modules/classes
+10. Extension points and customization options
+11. Common usage examples or code patterns
+12. How to implement or extend major components
+
 Repository Information:
 - Name: {name}
 - Description: {metadata.get("description", "No description")}
 - Primary Language: {metadata.get("language", "Unknown")}
 - Topics: {', '.join(metadata.get("topics", []))}
 
-Potential Modules/Components:
-{', '.join(modules) if modules else 'No clear modules identified'}
+{modules_for_prompt}
+{class_hierarchy_for_prompt}
 
 README Content:
-{readme[:4000] if readme else 'No README available'}
+{readme[:3000] if readme else 'No README available'}
 
 Important Source Files:
 {file_contents_for_prompt}
 
-Generate a structured technical summary in markdown format with clean sections, maximum 500 words.
-Focus on identifying 2-4 critical components/modules and provide 2-3 bullet points about each one's functionality.
+Generate a structured technical summary in markdown format with clean sections, maximum 800 words.
+For the "Key Components and Features" section:
+1. First, identify 2-3 core/foundational modules and provide detailed information for each:
+   - Primary purpose and responsibility
+   - Key features and capabilities
+   - Implementation details and usage patterns (how developers would use or extend this module)
+   - Examples of common extension or integration points
+
+2. Then, include an "Additional Modules" subsection that covers ALL remaining modules. For each module, include:
+   - What the module does (1-2 sentences)
+   - How it's typically used or implemented
+   - Any special integration patterns or dependencies
+
+IMPORTANT: Ensure that EVERY module listed in the Modules/Components section is mentioned in your summary. 
+None should be omitted, even if they seem less important.
 """
             try:
-                system_message = "You are a technical analyst specializing in creating concise, accurate summaries of software repositories. Focus on extracting key components, features, and architectural elements. When describing modules or services, be specific about their functionality."
+                system_message = "You are a technical analyst specializing in creating detailed, accurate summaries of software repositories. Focus on extracting key components, features, architectural elements, and implementation patterns. When describing modules or services, be specific about their functionality and how developers would use or extend them. Include information about inheritance hierarchies, interfaces, and common usage patterns."
                 
                 generated_summary = generate_completion(
                     prompt,
