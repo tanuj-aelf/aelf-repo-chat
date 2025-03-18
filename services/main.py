@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 import chromadb
 from chromadb.utils import embedding_functions
 from tiktoken import encoding_for_model
@@ -11,7 +12,7 @@ from lark_handler import init_lark_bot
 # Import repository summarizer
 from repo_summarizer import get_formatted_repo_summaries
 # Import model configuration
-from model_config import get_model_client, generate_completion
+from model_config import generate_completion, start_request_flow, end_request_flow, suppress_duplicate_logs
 
 # Determine the project root directory (one level up from services/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -32,12 +33,6 @@ logger = logging.getLogger("server")
 
 # Load environment variables from .env file
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
-
-# Initialize model client
-client = get_model_client({
-    "temperature": 0.2,
-    "timeout": 150
-})
 
 # Initialize ChromaDB client
 chroma_client = chromadb.PersistentClient(path=os.path.join(PROJECT_ROOT, "chroma_db"))
@@ -171,11 +166,14 @@ def truncate_to_token_limit(text, max_tokens, encoding='gpt-4'):
     truncated_tokens = tokens[:max_tokens]
     return tokenizer.decode(truncated_tokens)
 
-def summarize_text(text, max_tokens=200):
+def summarize_text(text, max_tokens=200, parent_request_id=None):
     """
     Summarize the text to fit within a limited number of tokens.
     For very long texts, it first truncates before attempting summarization.
     """
+    # Generate a request ID based on the input text (but tie it to the parent request)
+    request_id = f"summarize_{hash(text[:100])}"
+    
     # If text is very long, truncate it first to avoid context length errors
     # GPT-4o has a context length of ~128K tokens, but we use a much smaller limit for safety
     max_input_tokens = 12000
@@ -198,7 +196,9 @@ def summarize_text(text, max_tokens=200):
             config={
                 "max_tokens": max_tokens,
                 "temperature": 0.3
-            }
+            },
+            request_id=request_id,
+            parent_request_id=parent_request_id
         )
     except Exception as e:
         logger.error(f"Error summarizing text: {str(e)}")
@@ -206,7 +206,7 @@ def summarize_text(text, max_tokens=200):
         logger.info("Using fallback truncation for summarization")
         return truncated_text[:1000] + "..."
 
-def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_response_tokens=4000):
+def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_response_tokens=4000, request_id=None):
     """
     Generate a response using the configured model based on the query and retrieved context documents.
     """
@@ -242,7 +242,7 @@ def generate_gpt4_response(query, context_docs, max_context_tokens=8000, max_res
     summarized_contexts = []
     for doc in enhanced_docs:
         if len(doc) > 1500:  # Only summarize long documents
-            summarized = summarize_text(doc, max_tokens=500)
+            summarized = summarize_text(doc, max_tokens=500, parent_request_id=request_id)
             summarized_contexts.append(summarized)
         else:
             summarized_contexts.append(doc)
@@ -287,6 +287,9 @@ Question:
 
 Answer the question based only on the provided context."""
 
+    # Create final response request ID
+    final_request_id = f"final_{request_id}" if request_id else None
+
     # Retry logic for API calls
     max_retries = 3
     retry_count = 0
@@ -297,7 +300,6 @@ Answer the question based only on the provided context."""
             logger.info(f"Sending request to LLM API (attempt {retry_count + 1}/{max_retries})")
             
             # Set a timeout for the API call
-            import time
             start_time = time.time()
             
             answer = generate_completion(
@@ -306,8 +308,10 @@ Answer the question based only on the provided context."""
                 config={
                     "max_tokens": max_response_tokens,
                     "temperature": 0.2,
-                    "timeout": 150  # 60 second timeout for the API call
-                }
+                    "timeout": 150  # 150 second timeout for the API call
+                },
+                request_id=final_request_id,
+                parent_request_id=request_id
             )
             
             elapsed_time = time.time() - start_time
@@ -346,35 +350,43 @@ def chat_endpoint():
         
         logger.info(f"Received query: {query}")
         
-        # Retrieve documents from all collections
-        retrieved_docs = query_vector_db(query, top_k=top_k)
+        # Start a request flow for this chat query
+        request_id = start_request_flow(f"chat_{hash(query)}")
         
-        if not retrieved_docs:
+        try:
+            # Retrieve documents from all collections
+            retrieved_docs = query_vector_db(query, top_k=top_k)
+            
+            if not retrieved_docs:
+                end_request_flow(request_id)  # Clean up tracking
+                return jsonify({
+                    "answer": "I couldn't find any relevant information in the repository.",
+                    "source_documents": []
+                })
+            
+            # Generate response using GPT-4
+            answer = generate_gpt4_response(query, retrieved_docs, request_id=request_id)
+            
+            # Format source documents for the response
+            source_documents = []
+            for doc in retrieved_docs:
+                source_documents.append({
+                    "content": doc.get('document', '')[:200] + "...",  # Truncated preview
+                    "source": doc.get('metadata', {}).get('path', 'unknown'),
+                    "collection": doc.get('collection', 'unknown'),
+                    "relevance_score": round(doc.get('score', 0.0), 4)  # Use the score directly (already 0-1 scale)
+                })
+            
+            # Log the full response for debugging
+            logger.info(f"Returning answer with {len(source_documents)} source documents")
+            
             return jsonify({
-                "answer": "I couldn't find any relevant information in the repository.",
-                "source_documents": []
+                "answer": answer,
+                "source_documents": source_documents
             })
-        
-        # Generate response using GPT-4
-        answer = generate_gpt4_response(query, retrieved_docs)
-        
-        # Format source documents for the response
-        source_documents = []
-        for doc in retrieved_docs:
-            source_documents.append({
-                "content": doc.get('document', '')[:200] + "...",  # Truncated preview
-                "source": doc.get('metadata', {}).get('path', 'unknown'),
-                "collection": doc.get('collection', 'unknown'),
-                "relevance_score": round(doc.get('score', 0.0), 4)  # Use the score directly (already 0-1 scale)
-            })
-        
-        # Log the full response for debugging
-        logger.info(f"Returning answer with {len(source_documents)} source documents")
-        
-        return jsonify({
-            "answer": answer,
-            "source_documents": source_documents
-        })
+        finally:
+            # End the request flow to clean up tracking
+            end_request_flow(request_id)
     
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
@@ -384,6 +396,9 @@ def main():
     # Load configuration
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 5000))
+    
+    # Enable duplicate log suppression
+    suppress_duplicate_logs()
     
     # Initialize Lark bot handler
     init_lark_bot(app)
