@@ -1,6 +1,6 @@
 # aelf-repo-chat
 
-A conversational AI agent that allows users to query and retrieve information from any aelf GitHub repository. This tool ingests repository content into a vector database and uses OpenAI's GPT-4 to generate accurate, context-aware responses to questions about the codebase.
+A conversational AI agent that allows users to query and retrieve information from any aelf GitHub repository. This tool ingests repository content into a vector database and uses advanced language models (like GPT-4, Claude, or Gemini) to generate accurate, context-aware responses to questions about the codebase.
 
 ## Features
 
@@ -8,9 +8,10 @@ A conversational AI agent that allows users to query and retrieve information fr
 - Excludes binary and media files to focus on code and documentation
 - Stores content in a ChromaDB vector database for semantic search
 - Provides natural language interface to query repository information through REST API
-- Generates concise, accurate responses using GPT-4
+- Generates concise, accurate responses using AI models from multiple providers
 - Searches across multiple repositories simultaneously
 - Integrates with Lark (Feishu) bot for chat-based interaction
+- Supports multiple AI providers (Azure OpenAI, OpenAI, Google, Anthropic, and OpenRouter)
 
 ## Architecture
 
@@ -26,7 +27,12 @@ The application is split into three main components:
 
 - Python 3.8 or higher
 - GitHub access (for repository fetching)
-- OpenAI API key (for GPT-4 access)
+- API key for at least one supported AI provider:
+  - Azure OpenAI
+  - OpenAI
+  - Google AI (Gemini)
+  - Anthropic (Claude)
+  - OpenRouter
 
 ### Installation
 
@@ -76,14 +82,24 @@ pip install -r requirements.txt
 
 ```bash
 # Run the indexing script to process repositories defined in config.json
-python3 index_repos.py
+python3 -m services.index_repos
 ```
 
 #### Step 2: Start the API server
 
 ```bash
 # Start the API server
-python3 main.py
+python3 -m services.main
+```
+
+You can also generate or update repository summaries without re-indexing:
+
+```bash
+# Generate/update repository summaries
+python3 -m services.generate_summaries
+
+# View generated summaries
+python3 -m services.generate_summaries --print
 ```
 
 ### API Endpoints
@@ -121,13 +137,37 @@ Response:
 The application uses environment variables for configuration:
 
 ```
-# Azure OpenAI API Configuration
+# Model Provider Configuration
+MODEL_PROVIDER=azure_openai  # Options: azure_openai, openai, anthropic, google, openrouter
+
+# Azure OpenAI API Configuration (if using azure_openai)
 AZURE_OPENAI_API_KEY=your_openai_api_key
 AZURE_OPENAI_ENDPOINT=your_openai_endpoint
 AZURE_OPENAI_API_VERSION=2024-02-15-preview
+AZURE_OPENAI_MODEL=your_deployment_name
+
+# OpenAI Configuration (if using openai)
+OPENAI_API_KEY=your_openai_api_key  
+OPENAI_MODEL=gpt-4o  # Or other OpenAI models
+
+# Google Gemini Configuration (if using google)
+GOOGLE_API_KEY=your_google_api_key
+GOOGLE_MODEL=gemini-1.5-pro  # Or other Gemini models
+
+# Anthropic Configuration (if using anthropic)
+ANTHROPIC_API_KEY=your_anthropic_api_key
+ANTHROPIC_MODEL=claude-3-sonnet-20240229  # Or other Claude models
+
+# OpenRouter Configuration (if using openrouter)
+OPENROUTER_API_KEY=your_openrouter_api_key
+OPENROUTER_MODEL=deepseek/deepseek-chat:free  # Or another model available on OpenRouter
+OPENROUTER_SITE_URL=your_site_url  # Optional. Site URL for rankings on openrouter.ai
+OPENROUTER_SITE_NAME=your_site_name  # Optional. Site name for rankings on openrouter.ai
 
 # GitHub API Token
 GITHUB_TOKEN=your_github_token
+GITHUB_DEFAULT_OWNER=AElfProject
+GITHUB_DEFAULT_BRANCH=main
 
 # Server Configuration
 HOST=0.0.0.0
@@ -142,6 +182,18 @@ LARK_HOST=https://open.feishu.cn
 ```
 
 Note: The `.env` file is included in `.gitignore` to prevent sensitive information from being committed to the repository.
+
+## Model Configuration
+
+The application uses a flexible model configuration system that supports multiple AI providers:
+
+1. **Azure OpenAI** - Microsoft's hosted version of OpenAI models with additional enterprise features
+2. **OpenAI** - Direct integration with OpenAI's API (GPT-4, GPT-3.5, etc.)
+3. **Google** - Integration with Google's Gemini models
+4. **Anthropic** - Integration with Anthropic's Claude models
+5. **OpenRouter** - Access to various open-source and commercial models through a unified API
+
+To switch between providers, simply change the `MODEL_PROVIDER` environment variable in your `.env` file and ensure the corresponding API keys and model configurations are set.
 
 ## Lark Bot Integration
 

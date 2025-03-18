@@ -8,17 +8,13 @@ import requests
 import chromadb
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
-# Import the repository summarizer
 from repo_summarizer import generate_repo_summary, generate_all_repo_summaries
 
-# Determine the project root directory (one level up from services/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-# Ensure directories exist with absolute paths
 os.makedirs(os.path.join(PROJECT_ROOT, "logs"), exist_ok=True)
 os.makedirs(os.path.join(PROJECT_ROOT, "structured_content"), exist_ok=True)
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -29,23 +25,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("indexer")
 
-# Load environment variables
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
-# Initialize ChromaDB client
 chroma_client = chromadb.PersistentClient(path=os.path.join(PROJECT_ROOT, "chroma_db"))
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
-# GitHub API configuration
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 if not GITHUB_TOKEN:
     logger.warning("GITHUB_TOKEN not found in environment variables. You may encounter rate limiting issues.")
     logger.warning("Set GITHUB_TOKEN in your .env file to increase rate limits.")
 
 def get_github_headers():
-    """
-    Get headers for GitHub API requests including authentication token if available
-    """
+    """Get headers for GitHub API requests with auth token if available"""
     headers = {
         "Accept": "application/vnd.github.v3+json"
     }
@@ -54,9 +45,7 @@ def get_github_headers():
     return headers
 
 def get_repo_info(repo_url):
-    """
-    Extract the owner and repository name from the GitHub URL.
-    """
+    """Extract owner and repository name from GitHub URL"""
     parsed_url = urlparse(repo_url)
     path_parts = parsed_url.path.strip('/').split('/')
     if len(path_parts) < 2:
@@ -66,10 +55,7 @@ def get_repo_info(repo_url):
     return owner, repo
 
 def handle_rate_limit(response):
-    """
-    Handle GitHub API rate limiting by sleeping until the reset time if necessary
-    Returns True if rate limited and handled, False otherwise
-    """
+    """Handle GitHub API rate limiting by sleeping until reset time"""
     if response.status_code == 403 and 'X-RateLimit-Remaining' in response.headers:
         remaining = int(response.headers.get('X-RateLimit-Remaining', 0))
         
@@ -77,20 +63,18 @@ def handle_rate_limit(response):
             reset_time = int(response.headers.get('X-RateLimit-Reset', time.time() + 60))
             sleep_time = max(1, reset_time - time.time() + 1)
             
-            # Get rate limit info
             limit = response.headers.get('X-RateLimit-Limit', 'unknown')
             reset_datetime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(reset_time))
             
             logger.warning(f"GitHub API rate limit reached (Limit: {limit}). Waiting until {reset_datetime} ({sleep_time:.2f} seconds)")
             
-            # Sleep with progress updates for long waits
             if sleep_time > 300:  # If more than 5 minutes
                 end_time = time.time() + sleep_time
                 while time.time() < end_time:
                     remaining_time = end_time - time.time()
                     if remaining_time > 60:
                         logger.info(f"Rate limit: Still waiting... {int(remaining_time / 60)} minutes remaining.")
-                    time.sleep(min(60, remaining_time))  # Sleep for 1 minute at a time
+                    time.sleep(min(60, remaining_time))
             else:
                 time.sleep(sleep_time)
                 
@@ -100,9 +84,7 @@ def handle_rate_limit(response):
     return False
 
 def get_contents(owner, repo, branch="master", path=""):
-    """
-    Recursively retrieve the contents of the repository, excluding image and media files.
-    """
+    """Recursively retrieve repository contents, excluding media files"""
     api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
     params = {"ref": branch}
     headers = get_github_headers()
@@ -116,9 +98,8 @@ def get_contents(owner, repo, branch="master", path=""):
         try:
             response = requests.get(api_url, params=params, headers=headers)
             
-            # Handle rate limiting
             if handle_rate_limit(response):
-                continue  # Try the request again
+                continue
                 
             response.raise_for_status()
             items = response.json()
@@ -131,21 +112,18 @@ def get_contents(owner, repo, branch="master", path=""):
                 raise
             
             logger.warning(f"Error fetching {path}, retrying ({retry_count}/{max_retries}): {str(e)}")
-            time.sleep(5)  # Wait before retrying
+            time.sleep(5)
     
     contents = []
     
     if not isinstance(items, list):
         items = [items]
 
-    # Exclude image and media formats
     excluded_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.mp4', '.mp3', '.wav', '.avi', '.mov']
-    # Exclude specific files
     excluded_files = ['README.md', 'readme.md', 'Readme.md']
 
     for item in items:
         try:
-            # Skip excluded files
             if item['type'] == 'file' and (
                 any(item['path'].endswith(ext) for ext in excluded_extensions) or
                 any(item['name'] == excluded_file for excluded_file in excluded_files)
@@ -175,9 +153,7 @@ def get_contents(owner, repo, branch="master", path=""):
     return contents
 
 def get_file_content(download_url):
-    """
-    Retrieve the raw content of a file.
-    """
+    """Retrieve raw content of a file"""
     headers = get_github_headers()
     
     max_retries = 3
@@ -187,9 +163,8 @@ def get_file_content(download_url):
         try:
             response = requests.get(download_url, headers=headers)
             
-            # Handle rate limiting
             if handle_rate_limit(response):
-                continue  # Try the request again
+                continue
                 
             response.raise_for_status()
             return response.text
@@ -201,12 +176,10 @@ def get_file_content(download_url):
                 raise
             
             logger.warning(f"Error fetching file content, retrying ({retry_count}/{max_retries}): {str(e)}")
-            time.sleep(5)  # Wait before retrying
+            time.sleep(5)
 
 def flatten_contents(contents):
-    """
-    Flatten the nested contents into a list of files with paths and contents.
-    """
+    """Flatten nested contents into a list of files"""
     flat_files = []
 
     def _flatten(items):
@@ -223,10 +196,7 @@ def flatten_contents(contents):
     return flat_files
 
 def ingest_into_vector_db(files, collection_name):
-    """
-    Ingest files into the vector database using embeddings.
-    """
-    # First check if collection exists and delete it to refresh data
+    """Ingest files into the vector database"""
     try:
         chroma_client.delete_collection(name=collection_name)
         logger.info(f"Deleted existing collection: {collection_name}")
@@ -235,7 +205,6 @@ def ingest_into_vector_db(files, collection_name):
     
     collection = chroma_client.get_or_create_collection(name=collection_name, embedding_function=default_ef)
 
-    # Split files into batches to avoid memory issues
     batch_size = 100
     batches = [files[i:i + batch_size] for i in range(0, len(files), batch_size)]
     
@@ -243,7 +212,7 @@ def ingest_into_vector_db(files, collection_name):
     for batch_index, batch in enumerate(batches):
         texts = [file['content'] for file in batch]
         metadatas = [{'path': file['path']} for file in batch]
-        ids = [f"{file['path']}_{batch_index}_{i}" for i, file in enumerate(batch)]  # Ensure unique IDs
+        ids = [f"{file['path']}_{batch_index}_{i}" for i, file in enumerate(batch)]
         
         try:
             collection.add(documents=texts, metadatas=metadatas, ids=ids)
@@ -256,9 +225,7 @@ def ingest_into_vector_db(files, collection_name):
     return total_ingested
 
 def index_repository(repo_config):
-    """
-    Index a single repository based on its configuration.
-    """
+    """Index a repository based on its configuration"""
     url = repo_config["url"]
     name = repo_config["name"]
     branch = repo_config.get("branch", "master")
@@ -271,20 +238,17 @@ def index_repository(repo_config):
         
         repo_contents = get_contents(owner, repo, branch)
         
-        # Save structured content for debugging/reference in structured_content folder
         output_filename = os.path.join(PROJECT_ROOT, "structured_content", f"{name}_structured_content.json")
         with open(output_filename, 'w', encoding='utf-8') as f:
             json.dump(repo_contents, f, indent=2)
         logger.info(f"Repository contents saved to {output_filename}")
         
-        # Flatten and ingest
         flat_files = flatten_contents(repo_contents)
         logger.info(f"Flattened to {len(flat_files)} files")
         
         collection_name = f"{name}_collection"
         docs_ingested = ingest_into_vector_db(flat_files, collection_name)
         
-        # Generate repository summary
         try:
             logger.info(f"Generating summary for repository: {name}")
             summary = generate_repo_summary(repo_config)
@@ -302,11 +266,8 @@ def index_repository(repo_config):
         return False
 
 def cleanup_old_collections():
-    """
-    Remove collections that are no longer associated with repositories in config.json
-    """
+    """Remove collections no longer in config.json"""
     try:
-        # Get active collections from config
         config_path = os.path.join(PROJECT_ROOT, "config.json")
         with open(config_path, "r") as f:
             config = json.load(f)
@@ -314,11 +275,9 @@ def cleanup_old_collections():
         repositories = config.get("repositories", [])
         active_collection_names = [f"{repo['name']}_collection" for repo in repositories]
         
-        # Get all collections from DB
         all_collections = chroma_client.list_collections()
         all_collection_names = [collection.name for collection in all_collections]
         
-        # Find collections to remove
         collections_to_remove = [name for name in all_collection_names if name not in active_collection_names]
         
         if collections_to_remove:
@@ -337,9 +296,7 @@ def cleanup_old_collections():
         logger.error(f"Error during cleanup of old collections: {str(e)}")
 
 def main():
-    """
-    Main function to index all repositories from the config file.
-    """
+    """Index all repositories from the config file"""
     logger.info("Starting repository indexing process")
     
     try:
@@ -350,13 +307,11 @@ def main():
         logger.error(f"Failed to load config.json: {str(e)}")
         return
     
-    # Clean up old collections before indexing
     cleanup_old_collections()
     
     repositories = config.get("repositories", [])
     logger.info(f"Found {len(repositories)} repositories in config")
     
-    # Check if GitHub token is configured
     if not GITHUB_TOKEN:
         logger.warning("GitHub API Token not set. This will significantly limit API request rate.")
         logger.warning("Set GITHUB_TOKEN in your .env file to increase rate limits.")
@@ -371,7 +326,6 @@ def main():
         if success:
             success_count += 1
     
-    # Generate a combined summary file for all repositories
     try:
         logger.info("Generating combined summary file for all repositories")
         generate_all_repo_summaries()

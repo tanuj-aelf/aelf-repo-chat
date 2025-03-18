@@ -6,29 +6,42 @@ based on environment variables.
 
 import os
 import logging
+import time
+import threading
+import uuid
 from typing import Optional, Dict, Any, Union
 from dotenv import load_dotenv
 
-# Determine the project root directory (one level up from services/)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-# Load environment variables
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
-
-# Configure logging
 logger = logging.getLogger("model_config")
 
+# Client cache to avoid duplicate initializations
+_CLIENT_CACHE = {}
+
+# Track completion calls in a single request flow
+_ACTIVE_CALLS = {}
+_ACTIVITY_LOCK = threading.Lock()
+_SUPPRESSED_LOGS = False
+
+def suppress_duplicate_logs():
+    """Enable suppression of duplicate logs globally"""
+    global _SUPPRESSED_LOGS
+    _SUPPRESSED_LOGS = True
+    logger.info("Duplicate log suppression enabled")
+
+def enable_all_logs():
+    """Disable suppression of duplicate logs globally"""
+    global _SUPPRESSED_LOGS
+    _SUPPRESSED_LOGS = False
+    logger.info("Full logging enabled")
+
 def get_azure_openai_client(temperature: float = 0.2, timeout: int = 60) -> Any:
-    """
-    Initialize and return an Azure OpenAI client.
-    
-    Args:
-        temperature: The temperature for model inference
-        timeout: Request timeout in seconds
+    """Initialize and return an Azure OpenAI client."""
+    cache_key = f"azure_openai_{temperature}_{timeout}"
+    if cache_key in _CLIENT_CACHE:
+        return _CLIENT_CACHE[cache_key]
         
-    Returns:
-        An initialized Azure OpenAI client
-    """
     try:
         from openai import AzureOpenAI
         
@@ -47,11 +60,11 @@ def get_azure_openai_client(temperature: float = 0.2, timeout: int = 60) -> Any:
             api_version=api_version
         )
         
-        # Store client defaults
         client._default_temperature = temperature
         client._default_timeout = timeout
         client._default_model = os.getenv("AZURE_OPENAI_MODEL", "dapp-factory-gpt-4o-westus")
         
+        _CLIENT_CACHE[cache_key] = client
         return client
     
     except ImportError:
@@ -59,16 +72,11 @@ def get_azure_openai_client(temperature: float = 0.2, timeout: int = 60) -> Any:
         raise ImportError("OpenAI package is required for Azure OpenAI integration.")
 
 def get_openai_client(temperature: float = 0.2, timeout: int = 60) -> Any:
-    """
-    Initialize and return an OpenAI client.
-    
-    Args:
-        temperature: The temperature for model inference
-        timeout: Request timeout in seconds
+    """Initialize and return an OpenAI client."""
+    cache_key = f"openai_{temperature}_{timeout}"
+    if cache_key in _CLIENT_CACHE:
+        return _CLIENT_CACHE[cache_key]
         
-    Returns:
-        An initialized OpenAI client
-    """
     try:
         from openai import OpenAI
         
@@ -81,11 +89,11 @@ def get_openai_client(temperature: float = 0.2, timeout: int = 60) -> Any:
         logger.info("Initializing OpenAI client")
         client = OpenAI(api_key=api_key)
         
-        # Store client defaults
         client._default_temperature = temperature
         client._default_timeout = timeout
         client._default_model = os.getenv("OPENAI_MODEL", "gpt-4o")
         
+        _CLIENT_CACHE[cache_key] = client
         return client
     
     except ImportError:
@@ -93,16 +101,11 @@ def get_openai_client(temperature: float = 0.2, timeout: int = 60) -> Any:
         raise ImportError("OpenAI package is required for OpenAI integration.")
 
 def get_anthropic_client(temperature: float = 0.2, timeout: int = 60) -> Any:
-    """
-    Initialize and return an Anthropic client.
-    
-    Args:
-        temperature: The temperature for model inference
-        timeout: Request timeout in seconds
+    """Initialize and return an Anthropic client."""
+    cache_key = f"anthropic_{temperature}_{timeout}"
+    if cache_key in _CLIENT_CACHE:
+        return _CLIENT_CACHE[cache_key]
         
-    Returns:
-        An initialized Anthropic client
-    """
     try:
         from anthropic import Anthropic
         
@@ -115,11 +118,11 @@ def get_anthropic_client(temperature: float = 0.2, timeout: int = 60) -> Any:
         logger.info("Initializing Anthropic client")
         client = Anthropic(api_key=api_key)
         
-        # Store client defaults
         client._default_temperature = temperature
         client._default_timeout = timeout
         client._default_model = os.getenv("ANTHROPIC_MODEL", "claude-3-sonnet-20240229")
         
+        _CLIENT_CACHE[cache_key] = client
         return client
     
     except ImportError:
@@ -127,16 +130,11 @@ def get_anthropic_client(temperature: float = 0.2, timeout: int = 60) -> Any:
         raise ImportError("Anthropic package is required for Anthropic integration.")
 
 def get_google_client(temperature: float = 0.2, timeout: int = 60) -> Any:
-    """
-    Initialize and return a Google Generative AI client.
-    
-    Args:
-        temperature: The temperature for model inference
-        timeout: Request timeout in seconds
+    """Initialize and return a Google Generative AI client."""
+    cache_key = f"google_{temperature}_{timeout}"
+    if cache_key in _CLIENT_CACHE:
+        return _CLIENT_CACHE[cache_key]
         
-    Returns:
-        An initialized Google Generative AI client
-    """
     try:
         import google.generativeai as genai
         
@@ -149,7 +147,6 @@ def get_google_client(temperature: float = 0.2, timeout: int = 60) -> Any:
         logger.info("Initializing Google Generative AI client")
         genai.configure(api_key=api_key)
         
-        # Create a wrapped client object with similar interface to other clients
         class GoogleGenAIWrapper:
             def __init__(self, temperature=0.2, timeout=60, model="gemini-2.0-flash"):
                 self._default_temperature = temperature
@@ -168,7 +165,6 @@ def get_google_client(temperature: float = 0.2, timeout: int = 60) -> Any:
                 temperature = temperature or self.client._default_temperature
                 timeout = timeout or self.client._default_timeout
                 
-                # Convert OpenAI-style messages to Google format
                 prompt_parts = []
                 for msg in messages:
                     role = msg["role"]
@@ -189,7 +185,6 @@ def get_google_client(temperature: float = 0.2, timeout: int = 60) -> Any:
                     model_obj = genai.GenerativeModel(model_name=model, generation_config=generation_config)
                     response = model_obj.generate_content(prompt_parts)
                     
-                    # Create a response object similar to OpenAI's
                     class GoogleResponse:
                         def __init__(self, response):
                             self.choices = [GoogleChoice(response)]
@@ -208,23 +203,20 @@ def get_google_client(temperature: float = 0.2, timeout: int = 60) -> Any:
                     logger.error(f"Error in Google API call: {str(e)}")
                     raise
         
-        return GoogleGenAIWrapper(temperature=temperature, timeout=timeout, model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"))
+        client = GoogleGenAIWrapper(temperature=temperature, timeout=timeout, model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"))
+        _CLIENT_CACHE[cache_key] = client
+        return client
     
     except ImportError:
         logger.error("Failed to import Google Generative AI. Make sure the package is installed.")
         raise ImportError("Google Generative AI package is required for Google integration.")
 
 def get_openrouter_client(temperature: float = 0.2, timeout: int = 60) -> Any:
-    """
-    Initialize and return an OpenRouter client.
-    
-    Args:
-        temperature: The temperature for model inference
-        timeout: Request timeout in seconds
+    """Initialize and return an OpenRouter client (using OpenAI client with custom base_url)."""
+    cache_key = f"openrouter_{temperature}_{timeout}"
+    if cache_key in _CLIENT_CACHE:
+        return _CLIENT_CACHE[cache_key]
         
-    Returns:
-        An initialized OpenRouter client (using OpenAI client with custom base_url)
-    """
     try:
         from openai import OpenAI
         
@@ -242,13 +234,13 @@ def get_openrouter_client(temperature: float = 0.2, timeout: int = 60) -> Any:
             api_key=api_key
         )
         
-        # Store client defaults
         client._default_temperature = temperature
         client._default_timeout = timeout
         client._default_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat:free")
         client._site_url = site_url
         client._site_name = site_name
         
+        _CLIENT_CACHE[cache_key] = client
         return client
     
     except ImportError:
@@ -256,56 +248,105 @@ def get_openrouter_client(temperature: float = 0.2, timeout: int = 60) -> Any:
         raise ImportError("OpenAI package is required for OpenRouter integration.")
 
 def get_model_client(config: Optional[Dict[str, Any]] = None) -> Any:
-    """
-    Get the appropriate model client based on environment variables or config.
-    
-    Args:
-        config: Optional configuration dictionary with parameters like temperature
-        
-    Returns:
-        An initialized client for the specified model provider
-    """
+    """Get the appropriate model client based on environment variables or config."""
     config = config or {}
     temperature = config.get("temperature", 0.2)
     timeout = config.get("timeout", 60)
     
     model_provider = os.getenv("MODEL_PROVIDER", "azure_openai").lower()
+    cache_key = f"{model_provider}_{temperature}_{timeout}"
+    
+    if cache_key in _CLIENT_CACHE:
+        return _CLIENT_CACHE[cache_key]
     
     try:
+        client = None
         if model_provider == "azure_openai":
-            return get_azure_openai_client(temperature, timeout)
+            client = get_azure_openai_client(temperature, timeout)
         elif model_provider == "openai":
-            return get_openai_client(temperature, timeout)
+            client = get_openai_client(temperature, timeout)
         elif model_provider == "anthropic":
-            return get_anthropic_client(temperature, timeout)
+            client = get_anthropic_client(temperature, timeout)
         elif model_provider in ["google", "google_genai"]:
-            return get_google_client(temperature, timeout)
+            client = get_google_client(temperature, timeout)
         elif model_provider == "openrouter":
-            return get_openrouter_client(temperature, timeout)
+            client = get_openrouter_client(temperature, timeout)
         else:
             logger.error(f"Unsupported model provider: {model_provider}")
-            # Default to Azure OpenAI as fallback
             logger.info("Falling back to Azure OpenAI")
-            return get_azure_openai_client(temperature, timeout)
+            client = get_azure_openai_client(temperature, timeout)
+            
+        return client
     
     except Exception as e:
         logger.error(f"Error initializing model client: {str(e)}")
         logger.info("Falling back to Azure OpenAI due to error")
         return get_azure_openai_client(temperature, timeout)
 
-def generate_completion(prompt: Union[str, list], system_message: Optional[str] = None, 
-                       config: Optional[Dict[str, Any]] = None) -> str:
-    """
-    Generate text completion using the configured model.
+def start_request_flow(request_id=None):
+    """Start tracking a new request flow, returns a request ID that can be used for 
+    all related generate_completion calls."""
+    if request_id is None:
+        request_id = f"req_{uuid.uuid4()}"
     
-    Args:
-        prompt: The prompt text or list of message dictionaries
-        system_message: Optional system message to include (if prompt is a string)
-        config: Optional configuration parameters (temperature, max_tokens, etc.)
+    with _ACTIVITY_LOCK:
+        _ACTIVE_CALLS[request_id] = {
+            'started': time.time(),
+            'is_primary': True,
+            'children': [],
+            'logged': False
+        }
+    
+    logger.debug(f"Started new request flow: {request_id}")
+    return request_id
+
+def end_request_flow(request_id):
+    """End tracking for a request flow and all its children"""
+    if not request_id:
+        return
+    
+    with _ACTIVITY_LOCK:
+        if request_id in _ACTIVE_CALLS:
+            # Clean up this request and all children
+            for child_id in _ACTIVE_CALLS[request_id].get('children', []):
+                if child_id in _ACTIVE_CALLS:
+                    del _ACTIVE_CALLS[child_id]
+            
+            del _ACTIVE_CALLS[request_id]
+            logger.debug(f"Ended request flow: {request_id}")
+
+def _is_part_of_active_flow(request_id):
+    """Check if a request ID is part of an active flow and if logging should be suppressed"""
+    if not request_id:
+        return False, False
+    
+    with _ACTIVITY_LOCK:
+        # If this is a directly tracked request
+        if request_id in _ACTIVE_CALLS:
+            record = _ACTIVE_CALLS[request_id]
+            # If it's already been logged, suppress
+            if record.get('logged', False):
+                return True, True
+            else:
+                # Mark as logged and don't suppress
+                record['logged'] = True
+                return True, False
         
-    Returns:
-        The generated text completion
-    """
+        # Check if it's a child of any active request
+        for parent_id, record in _ACTIVE_CALLS.items():
+            if request_id in record.get('children', []):
+                if record.get('logged', False):
+                    return True, True
+                else:
+                    record['logged'] = True
+                    return True, False
+    
+    return False, False
+
+def generate_completion(prompt: Union[str, list], system_message: Optional[str] = None, 
+                        config: Optional[Dict[str, Any]] = None, request_id: Optional[str] = None,
+                        parent_request_id: Optional[str] = None) -> str:
+    """Generate text completion using the configured model."""
     config = config or {}
     client = get_model_client(config)
     
@@ -314,24 +355,44 @@ def generate_completion(prompt: Union[str, list], system_message: Optional[str] 
     timeout = config.get("timeout", client._default_timeout)
     model = config.get("model", client._default_model)
     
-    # Determine if we're using a message-based or a string-based prompt
+    # Create a unique identifier for this request if not provided
+    if not request_id:
+        request_id = f"gen_{uuid.uuid4()}"
+    
+    # Register this request in the flow if it has a parent
+    if parent_request_id:
+        with _ACTIVITY_LOCK:
+            if parent_request_id in _ACTIVE_CALLS:
+                if request_id not in _ACTIVE_CALLS[parent_request_id]['children']:
+                    _ACTIVE_CALLS[parent_request_id]['children'].append(request_id)
+                    _ACTIVE_CALLS[request_id] = {
+                        'started': time.time(),
+                        'is_primary': False,
+                        'parent': parent_request_id,
+                        'children': [],
+                        'logged': _ACTIVE_CALLS[parent_request_id].get('logged', False)
+                    }
+    
+    # Determine if we should log this request
+    is_tracked, should_suppress = _is_part_of_active_flow(request_id)
+    
+    # Force suppression if global setting is enabled
+    should_suppress = should_suppress or _SUPPRESSED_LOGS
+    
     if isinstance(prompt, str):
         messages = []
         if system_message:
             messages.append({"role": "system", "content": system_message})
         messages.append({"role": "user", "content": prompt})
     else:
-        # Assume it's already in the message format
         messages = prompt
     
-    logger.info(f"Generating completion with {type(client).__name__} (model: {model})")
+    if not should_suppress:
+        logger.info(f"Generating completion with {type(client).__name__} (model: {model})")
     
     try:
-        # Different clients have different APIs
         if hasattr(client, "chat") and hasattr(client.chat, "completions"):
-            # OpenAI/Azure OpenAI style
             if os.getenv("MODEL_PROVIDER", "").lower() == "openrouter":
-                # OpenRouter specific parameters
                 extra_headers = {}
                 if hasattr(client, "_site_url") and client._site_url:
                     extra_headers["HTTP-Referer"] = client._site_url
@@ -348,7 +409,6 @@ def generate_completion(prompt: Union[str, list], system_message: Optional[str] 
                     extra_body={}
                 )
             else:
-                # Standard OpenAI/Azure OpenAI
                 response = client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -359,7 +419,6 @@ def generate_completion(prompt: Union[str, list], system_message: Optional[str] 
             return response.choices[0].message.content.strip()
         
         elif hasattr(client, "chat_completions"):
-            # Google wrapper style
             response = client.chat_completions().create(
                 model=model,
                 messages=messages,
@@ -370,7 +429,6 @@ def generate_completion(prompt: Union[str, list], system_message: Optional[str] 
             return response.choices[0].message.content.strip()
         
         elif hasattr(client, "messages"):
-            # Anthropic style
             system = None
             user_content = ""
             
@@ -396,9 +454,27 @@ def generate_completion(prompt: Union[str, list], system_message: Optional[str] 
     except Exception as e:
         logger.error(f"Error generating completion: {str(e)}")
         return f"Error generating response: {str(e)}"
+    finally:
+        # If this is a standalone request (not part of a flow), clean it up
+        if not is_tracked and not parent_request_id:
+            with _ACTIVITY_LOCK:
+                if request_id in _ACTIVE_CALLS:
+                    del _ACTIVE_CALLS[request_id]
+
+def clear_client_cache():
+    """Clear the client cache for testing or memory management purposes."""
+    global _CLIENT_CACHE
+    _CLIENT_CACHE.clear()
+    logger.info("Client cache cleared")
+
+def clear_request_tracking():
+    """Clear all request tracking data."""
+    with _ACTIVITY_LOCK:
+        global _ACTIVE_CALLS
+        _ACTIVE_CALLS.clear()
+    logger.info("Request tracking cleared")
 
 if __name__ == "__main__":
-    # Simple test
     logging.basicConfig(level=logging.INFO)
     
     try:
