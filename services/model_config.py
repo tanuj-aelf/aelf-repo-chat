@@ -214,6 +214,47 @@ def get_google_client(temperature: float = 0.2, timeout: int = 60) -> Any:
         logger.error("Failed to import Google Generative AI. Make sure the package is installed.")
         raise ImportError("Google Generative AI package is required for Google integration.")
 
+def get_openrouter_client(temperature: float = 0.2, timeout: int = 60) -> Any:
+    """
+    Initialize and return an OpenRouter client.
+    
+    Args:
+        temperature: The temperature for model inference
+        timeout: Request timeout in seconds
+        
+    Returns:
+        An initialized OpenRouter client (using OpenAI client with custom base_url)
+    """
+    try:
+        from openai import OpenAI
+        
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        site_url = os.getenv("OPENROUTER_SITE_URL", "")
+        site_name = os.getenv("OPENROUTER_SITE_NAME", "")
+        
+        if not api_key:
+            logger.error("Missing required OpenRouter API key")
+            raise ValueError("OpenRouter configuration is incomplete. Check OPENROUTER_API_KEY.")
+        
+        logger.info("Initializing OpenRouter client")
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key
+        )
+        
+        # Store client defaults
+        client._default_temperature = temperature
+        client._default_timeout = timeout
+        client._default_model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat:free")
+        client._site_url = site_url
+        client._site_name = site_name
+        
+        return client
+    
+    except ImportError:
+        logger.error("Failed to import OpenAI. Make sure the OpenAI package is installed.")
+        raise ImportError("OpenAI package is required for OpenRouter integration.")
+
 def get_model_client(config: Optional[Dict[str, Any]] = None) -> Any:
     """
     Get the appropriate model client based on environment variables or config.
@@ -239,6 +280,8 @@ def get_model_client(config: Optional[Dict[str, Any]] = None) -> Any:
             return get_anthropic_client(temperature, timeout)
         elif model_provider in ["google", "google_genai"]:
             return get_google_client(temperature, timeout)
+        elif model_provider == "openrouter":
+            return get_openrouter_client(temperature, timeout)
         else:
             logger.error(f"Unsupported model provider: {model_provider}")
             # Default to Azure OpenAI as fallback
@@ -287,13 +330,32 @@ def generate_completion(prompt: Union[str, list], system_message: Optional[str] 
         # Different clients have different APIs
         if hasattr(client, "chat") and hasattr(client.chat, "completions"):
             # OpenAI/Azure OpenAI style
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                timeout=timeout
-            )
+            if os.getenv("MODEL_PROVIDER", "").lower() == "openrouter":
+                # OpenRouter specific parameters
+                extra_headers = {}
+                if hasattr(client, "_site_url") and client._site_url:
+                    extra_headers["HTTP-Referer"] = client._site_url
+                if hasattr(client, "_site_name") and client._site_name:
+                    extra_headers["X-Title"] = client._site_name
+                
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                    extra_headers=extra_headers,
+                    extra_body={}
+                )
+            else:
+                # Standard OpenAI/Azure OpenAI
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=timeout
+                )
             return response.choices[0].message.content.strip()
         
         elif hasattr(client, "chat_completions"):
