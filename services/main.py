@@ -69,60 +69,183 @@ def get_all_collections():
     logger.info(f"All available collections in DB: {collection_names}")
     return collection_names
 
-def query_vector_db(query, top_k=10):
+def determine_relevant_collections(query, request_id=None):
+    """
+    Use an LLM to determine which collections are most relevant to the query.
+    Returns a list of collection names based on the repository summaries.
+    """
+    try:
+        logger.info(f"Determining relevant collections for query: {query}")
+        
+        summary_path = os.path.join(PROJECT_ROOT, "repo_summaries", "all_repo_summaries.json")
+        
+        try:
+            with open(summary_path, "r") as f:
+                repo_summaries = json.load(f)
+            
+            repo_info = []
+            for repo_name, repo_data in repo_summaries.items():
+                modules = repo_data.get("modules", [])
+                description = repo_data.get("metadata", {}).get("description", "")
+                
+                repo_info.append({
+                    "name": repo_name,
+                    "collection_name": f"{repo_name}_collection",
+                    "description": description,
+                    "modules": modules
+                })
+            
+            repo_info = sorted(repo_info, key=lambda x: x["name"])
+            
+            repo_descriptions = "\n\n".join([
+                f"Repository: {repo['name']}\nDescription: {repo['description']}\nModules: {', '.join(repo['modules'])}"
+                for repo in repo_info
+            ])
+            
+            prompt = f"""Based on the following query and repository descriptions, determine which repositories are most relevant for finding information to answer the query.
+
+Query: {query}
+
+Available repositories:
+{repo_descriptions}
+
+Instructions:
+1. Analyze the query and understand its information needs
+2. Review each repository's purpose, description, and modules
+3. Select ONLY repositories that are likely to contain information relevant to the query
+4. Return ONLY a JSON array of collection names in the format: ["repository_name_collection"]
+5. If unsure, select all repositories
+6. Do not include any explanations, only return the JSON array
+
+JSON array of relevant collection names:"""
+
+            sub_request_id = f"determine_collections_{hash(query)}"
+            
+            response = generate_completion(
+                prompt,
+                system_message="You are a repository selection assistant. Your task is to determine which repositories are most relevant to a given query. Return only a valid JSON array of collection names.",
+                config={
+                    "max_tokens": 200,
+                    "temperature": 0.1 
+                },
+                request_id=sub_request_id,
+                parent_request_id=request_id
+            )
+            
+            logger.info(f"Raw LLM response: '{response}'")
+            
+            try:
+                response_cleaned = response.strip()
+                
+                if response_cleaned.startswith("```") and response_cleaned.endswith("```"):
+                    json_str = response_cleaned.strip("```").strip()
+                    if json_str.startswith("json"):
+                        json_str = json_str[4:].strip()
+                    response_cleaned = json_str
+                elif not (response_cleaned.startswith("[") and response_cleaned.endswith("]")):
+                    start_idx = response_cleaned.find("[")
+                    end_idx = response_cleaned.rfind("]")
+                    if start_idx >= 0 and end_idx >= 0:
+                        json_str = response_cleaned[start_idx:end_idx+1]
+                        response_cleaned = json_str
+                    else:
+                        logger.error(f"Could not find JSON array in response: '{response_cleaned}'")
+                        raise ValueError("Could not find JSON array in response")
+                
+                relevant_collections = json.loads(response_cleaned)
+                logger.info(f"Parsed collections: {relevant_collections}")
+                
+                all_collections = get_active_collections()
+                
+                # Create mapping of repo names to collection names
+                repo_to_collection_map = {}
+                for collection_name in all_collections:
+                    if collection_name.endswith("_collection"):
+                        repo_name = collection_name[:-11]  # Remove "_collection" suffix
+                        repo_to_collection_map[repo_name] = collection_name
+                        repo_to_collection_map[collection_name] = collection_name
+                
+                # Transform LLM results to valid collection names
+                transformed_collections = []
+                for coll in relevant_collections:
+                    if coll in all_collections:
+                        transformed_collections.append(coll)
+                    elif coll in repo_to_collection_map:
+                        transformed_collections.append(repo_to_collection_map[coll])
+                    elif f"{coll}_collection" in all_collections:
+                        transformed_collections.append(f"{coll}_collection")
+                
+                logger.info(f"Transformed collections: {transformed_collections}")
+                
+                valid_collections = [coll for coll in transformed_collections if coll in all_collections]
+                
+                if not valid_collections:
+                    logger.warning(f"No valid collections found in LLM response. Falling back to all collections.")
+                    return all_collections
+                
+                logger.info(f"LLM determined relevant collections: {valid_collections}")
+                return valid_collections
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Error parsing LLM response as JSON: {str(e)}")
+                return get_active_collections()
+                
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.error(f"Error reading repository summaries: {str(e)}")
+            return get_active_collections()
+            
+    except Exception as e:
+        logger.error(f"Error determining relevant collections: {str(e)}")
+        return get_active_collections()
+
+def query_vector_db(query, top_k=20, request_id=None):
     """
     Query collections in the vector database to retrieve the most relevant documents.
-    Only queries collections from active repositories defined in config.json.
+    First uses LLM to determine which collections are most relevant to the query,
+    then only queries those collections.
     """
-    collection_names = get_active_collections()
-    logger.info(f"Querying across {len(collection_names)} collections: {collection_names}")
+    collection_names = determine_relevant_collections(query, request_id=request_id)
+    logger.info(f"Querying across {len(collection_names)} selected collections: {collection_names}")
     
     all_docs = []
     
-    # First pass: get documents from each collection
     for collection_name in collection_names:
         try:
             collection = chroma_client.get_collection(name=collection_name, embedding_function=default_ef)
             
-            # Query for more documents initially to ensure we get enough candidates
-            collection_top_k = min(top_k * 2, 10)  # Get more candidates but cap at 10
+            collection_top_k = min(top_k * 2, 20)  # Get more candidates but cap at 20
             
             results = collection.query(
                 query_texts=[query],
                 n_results=collection_top_k
             )
             
-            # Process results and add collection name to metadata
             for i, doc_list in enumerate(results['documents']):
                 for j, doc in enumerate(doc_list):
-                    # Skip empty documents
                     if not doc or len(doc.strip()) == 0:
                         continue
                         
                     metadata = results['metadatas'][i][j] if i < len(results['metadatas']) and j < len(results['metadatas'][i]) else {}
                     file_path = metadata.get('path', '')
                     
-                    # Skip README.md files
                     if file_path.lower().endswith('readme.md'):
                         logger.debug(f"Skipping README file: {file_path}")
                         continue
                     
                     metadata['collection'] = collection_name
                     
-                    # Assign a score based on position (ChromaDB returns in order of relevance)
-                    # First result gets highest score
+                    # Calculate position-based score
                     position_score = 1.0 - (j / collection_top_k if collection_top_k > 0 else 0)
                     
-                    # Assign a higher base score to documents containing exact keyword matches
+                    # Calculate keyword match score
                     keyword_score = 0.0
                     query_terms = [term.lower() for term in query.split() if len(term) > 3]
                     doc_lower = doc.lower()
                     
                     for term in query_terms:
                         if term in doc_lower:
-                            keyword_score += 0.2  # Boost for each keyword match
+                            keyword_score += 0.2
                     
-                    # Combine scores (position is more important, but keywords can boost)
                     combined_score = position_score * 0.7 + min(keyword_score, 0.3)
                     
                     all_docs.append({
@@ -136,14 +259,13 @@ def query_vector_db(query, top_k=10):
         except Exception as e:
             logger.error(f"Error querying collection {collection_name}: {str(e)}")
     
-    # Second pass: rank all documents and select the best ones
     # Sort by combined score (higher is better)
     all_docs = sorted(all_docs, key=lambda x: x.get('score', 0.0), reverse=True)
     
     # Take the top_k overall
     all_docs = all_docs[:top_k]
     
-    # Log document sources to help with debugging
+    # Log document sources
     collection_counts = {}
     for doc in all_docs:
         collection = doc.get('collection', 'unknown')
@@ -338,7 +460,7 @@ Answer the question based only on the provided context."""
 def chat_endpoint():
     """
     API endpoint for chat functionality.
-    Expects JSON with format: {"query": "your question here", "top_k": 10}
+    Expects JSON with format: {"query": "your question here", "top_k": 20}
     """
     try:
         data = request.json
@@ -346,7 +468,7 @@ def chat_endpoint():
             return jsonify({"error": "Missing 'query' parameter"}), 400
         
         query = data['query']
-        top_k = data.get('top_k', 10)  # Default to 10 if not specified
+        top_k = data.get('top_k', 20)  # Default to 20 if not specified
         
         logger.info(f"Received query: {query}")
         
@@ -355,7 +477,7 @@ def chat_endpoint():
         
         try:
             # Retrieve documents from all collections
-            retrieved_docs = query_vector_db(query, top_k=top_k)
+            retrieved_docs = query_vector_db(query, top_k=top_k, request_id=request_id)
             
             if not retrieved_docs:
                 end_request_flow(request_id)  # Clean up tracking
