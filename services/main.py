@@ -264,7 +264,7 @@ def parse_json_array_safely(response_text):
     
     return file_paths
 
-def select_relevant_files(query, structured_content, repo_name, max_files=20, request_id=None):
+def select_relevant_files(query, structured_content, repo_name, max_files=50, request_id=None):
     """
     Use an LLM to select the most relevant files from the structured content based on the query.
     This replaces the RAG approach with a more intelligent file selection process.
@@ -377,12 +377,16 @@ Here are previews of some representative files to help you understand the codeba
 Your task:
 1. Analyze the query carefully to understand what implementation is needed
 2. Examine the file structure to identify potentially relevant files
-3. Focus on files that would be most useful as examples or templates for implementing the requested functionality
-4. Select files that contain:
+3. Select files that would be most useful as examples or templates for implementing the requested functionality
+4. IMPORTANT: Include files that contain:
    - Interfaces and base classes that define the architecture
    - Implementation examples similar to what the user is trying to build
+   - Files with import/using statements and dependent methods that the primary files reference
    - Configuration and utility code needed for the implementation
-5. Limit your selection to at most {max_files} files, prioritizing the most relevant ones
+5. Look for dependency chains - if file A is relevant and imports code from file B, include BOTH files
+6. Include interface definitions for any implementations that are selected
+7. Prioritize completeness of context over brevity - include supporting files that help understand the code
+8. Limit your selection to at most {max_files} files, prioritizing the most relevant ones
 
 Return ONLY a JSON array of file paths in this format:
 ["file/path1.ext", "file/path2.ext", ...]
@@ -393,7 +397,7 @@ Do not include any explanation or reasoning, only the JSON array.
     try:
         response = generate_completion(
             prompt,
-            system_message="You are a code file selection assistant specialized in the Aevatar framework. Your task is to select the most relevant files from a repository to implement a specific feature. Return only a valid JSON array of file paths.",
+            system_message="You are a code file selection assistant specialized in the Aevatar framework. Your task is to select the most relevant files from a repository to implement a specific feature, including all necessary dependent and imported files for complete context. Return only a valid JSON array of file paths.",
             config={
                 "max_tokens": 500,
                 "temperature": 0.2
@@ -442,7 +446,7 @@ Do not include any explanation or reasoning, only the JSON array.
         logger.error(f"Error selecting files from {repo_name}: {str(e)}")
         return []
 
-def get_relevant_documents(query, max_files_per_repo=10, request_id=None):
+def get_relevant_documents(query, max_files_per_repo=50, request_id=None):
     """
     Get the most relevant documents for a query by using LLM to:
     1. Determine which repositories are relevant to the query
