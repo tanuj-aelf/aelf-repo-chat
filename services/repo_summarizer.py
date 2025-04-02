@@ -238,6 +238,241 @@ def extract_class_hierarchies(structured_content):
     extract_from_files(structured_content)
     return class_hierarchy
 
+def generate_tree_structure_from_structured_content(structured_content, max_depth=5):
+    """
+    Recursively generate a tree structure representation from structured content.
+    This will allow the LLM to have a more comprehensive view of the repository structure.
+    
+    The structure is returned as a nested dictionary with directories and files.
+    """
+    if not structured_content:
+        return {}
+    
+    def process_item(item, current_depth=0):
+        if current_depth > max_depth:
+            return {"truncated": "maximum depth reached"}
+        
+        if item.get("type") == "file":
+            return {
+                "type": "file",
+                "path": item.get("path", ""),
+                "name": item.get("path", "").split("/")[-1],
+                "size": len(item.get("content", "")) if "content" in item else "unknown"
+            }
+        elif item.get("type") == "dir":
+            dir_contents = {}
+            if "contents" in item and item["contents"]:
+                for subitem in item["contents"]:
+                    name = subitem.get("path", "").split("/")[-1]
+                    dir_contents[name] = process_item(subitem, current_depth + 1)
+            
+            return {
+                "type": "dir",
+                "path": item.get("path", ""),
+                "name": item.get("path", "").split("/")[-1],
+                "contents": dir_contents
+            }
+        return {}
+    
+    tree = {}
+    for item in structured_content:
+        name = item.get("path", "").split("/")[-1]
+        tree[name] = process_item(item)
+    
+    return tree
+
+def extract_detailed_modules_from_structured_content(structured_content):
+    """
+    Extract detailed information about all modules in the repository.
+    This is an enhanced version of the extract_modules_from_structured_content function 
+    that provides more comprehensive information about each module.
+    """
+    if not structured_content:
+        return []
+    
+    modules_info = []
+    
+    # Look for more source directories beyond just src, source, lib
+    source_dir_patterns = ["src", "source", "lib", "core", "modules", "components", "services"]
+    
+    # First identify all potential module directories
+    for item in structured_content:
+        if item.get("type") == "dir":
+            dir_name = item.get("path", "").lower()
+            dir_name_short = dir_name.split("/")[-1].lower()
+            
+            if dir_name_short in source_dir_patterns:
+                if "contents" in item:
+                    # These are potential modules
+                    for subitem in item.get("contents", []):
+                        if subitem.get("type") == "dir":
+                            module_info = _process_module_dir(subitem)
+                            if module_info:
+                                modules_info.append(module_info)
+            else:
+                # Check if this directory is itself a module
+                module_info = _process_module_dir(item)
+                if module_info:
+                    modules_info.append(module_info)
+    
+    return modules_info
+
+def _process_module_dir(dir_item):
+    """Helper function to process a module directory and extract detailed information"""
+    if not dir_item or dir_item.get("type") != "dir" or "contents" not in dir_item:
+        return None
+    
+    module_name = dir_item.get("path", "").split("/")[-1]
+    module_path = dir_item.get("path", "")
+    
+    # Initialize module info
+    module_info = {
+        "name": module_name,
+        "path": module_path,
+        "description": "",
+        "purpose": "",
+        "key_classes": [],
+        "interfaces": [],
+        "important_files": [],
+        "dependencies": [],
+        "usage_examples": []
+    }
+    
+    # Process files in the module
+    _extract_module_details_from_files(dir_item, module_info)
+    
+    # If module still has no description, try to infer from file contents
+    if not module_info["description"] and module_info["key_classes"]:
+        module_info["description"] = f"Module containing {', '.join(module_info['key_classes'][:3])}"
+    
+    # Only include modules with at least some information
+    if (module_info["key_classes"] or 
+        module_info["interfaces"] or 
+        module_info["important_files"] or 
+        module_info["description"]):
+        return module_info
+    
+    return None
+
+def _extract_module_details_from_files(dir_item, module_info):
+    """Extract detailed information about a module from its files"""
+    # Common patterns for important files
+    important_file_patterns = [
+        r".*\.csproj$", r".*\.cs$", r".*\.json$", r".*\.md$",
+        r".*Service\..*$", r".*Controller\..*$", r".*Repository\..*$",
+        r".*Provider\..*$", r".*Factory\..*$", r".*Manager\..*$"
+    ]
+    patterns = [re.compile(pattern, re.IGNORECASE) for pattern in important_file_patterns]
+    
+    # Process all files in the directory
+    for item in dir_item.get("contents", []):
+        if item.get("type") == "file":
+            file_path = item.get("path", "")
+            file_name = file_path.split("/")[-1]
+            
+            # Check if this is an important file
+            if any(pattern.match(file_path) for pattern in patterns):
+                module_info["important_files"].append(file_name)
+                
+                # If it's a .csproj file, try to extract dependencies
+                if file_path.endswith(".csproj") and "content" in item:
+                    _extract_dependencies_from_csproj(item.get("content", ""), module_info)
+                    
+                # Extract information from code files
+                if file_path.endswith(".cs") and "content" in item:
+                    content = item.get("content", "")
+                    
+                    # Extract class information
+                    _extract_class_info(content, file_name, module_info)
+                    
+                    # Look for usage examples in comments
+                    _extract_usage_examples(content, module_info)
+                    
+                    # Try to find module purpose from comments or attributes
+                    if not module_info["description"]:
+                        _extract_purpose_from_comments(content, module_info)
+        
+        # Recursively process subdirectories
+        elif item.get("type") == "dir" and "contents" in item:
+            for subitem in item.get("contents", []):
+                if subitem.get("type") == "file":
+                    # Process important files in subdirectories
+                    file_path = subitem.get("path", "")
+                    file_name = file_path.split("/")[-1]
+                    
+                    if any(pattern.match(file_path) for pattern in patterns):
+                        module_info["important_files"].append(f"{item.get('path', '').split('/')[-1]}/{file_name}")
+                        
+                        # Only process code files for detailed info
+                        if file_path.endswith(".cs") and "content" in subitem:
+                            content = subitem.get("content", "")
+                            _extract_class_info(content, file_name, module_info)
+
+def _extract_class_info(content, file_name, module_info):
+    """Extract class and interface information from file content"""
+    # Extract class definitions
+    class_matches = re.finditer(r'(public|internal|private)?\s+class\s+(\w+)', content)
+    for match in class_matches:
+        class_name = match.group(2)
+        if class_name not in module_info["key_classes"]:
+            module_info["key_classes"].append(class_name)
+    
+    # Extract interface definitions
+    interface_matches = re.finditer(r'(public|internal|private)?\s+interface\s+(\w+)', content)
+    for match in interface_matches:
+        interface_name = match.group(2)
+        if interface_name not in module_info["interfaces"]:
+            module_info["interfaces"].append(interface_name)
+    
+    # Look for XML documentation
+    summary_match = re.search(r'///\s*<summary>(.*?)</summary>', content, re.DOTALL)
+    if summary_match and not module_info["description"]:
+        description = summary_match.group(1).strip()
+        # Clean up description
+        description = re.sub(r'\s+', ' ', description)
+        module_info["description"] = description
+
+def _extract_dependencies_from_csproj(content, module_info):
+    """Extract project dependencies from csproj file content"""
+    # Look for PackageReference entries
+    package_refs = re.finditer(r'<PackageReference\s+Include=[\'"]([^\'"]+)[\'"]', content)
+    for match in package_refs:
+        package_name = match.group(1)
+        if package_name not in module_info["dependencies"]:
+            module_info["dependencies"].append(package_name)
+    
+    # Look for ProjectReference entries
+    project_refs = re.finditer(r'<ProjectReference\s+Include=[\'"]([^\'"]+)[\'"]', content)
+    for match in project_refs:
+        project_path = match.group(1)
+        project_name = project_path.split('/')[-1].replace(".csproj", "")
+        if project_name not in module_info["dependencies"]:
+            module_info["dependencies"].append(project_name)
+
+def _extract_usage_examples(content, module_info):
+    """Extract usage examples from code comments"""
+    # Look for example sections in comments
+    example_match = re.search(r'///\s*<example>(.*?)</example>', content, re.DOTALL)
+    if example_match:
+        example = example_match.group(1).strip()
+        module_info["usage_examples"].append(example)
+    
+    # Alternative pattern: look for "Example:" or "Usage:" in comments
+    alt_example_match = re.search(r'//\s*(Example|Usage):(.*?)(\n\s*//\s*[A-Z]|\n\s*\n)', content, re.DOTALL)
+    if alt_example_match:
+        example = alt_example_match.group(2).strip()
+        module_info["usage_examples"].append(example)
+
+def _extract_purpose_from_comments(content, module_info):
+    """Extract the purpose of the module from file comments"""
+    # Check for purpose in comments
+    purpose_match = re.search(r'///?\s*(Purpose|Description|About):(.*?)(\n\s*///?|$)', content, re.DOTALL)
+    if purpose_match:
+        purpose = purpose_match.group(2).strip()
+        module_info["purpose"] = purpose
+        if not module_info["description"]:
+            module_info["description"] = purpose
+
 def generate_repo_summary(repo_config):
     repo_url = repo_config["url"]
     name = repo_config["name"]
@@ -252,17 +487,26 @@ def generate_repo_summary(repo_config):
         structured_content = load_structured_content(name)
         
         if structured_content:
+            # Generate tree structure representation
+            tree_structure = generate_tree_structure_from_structured_content(structured_content)
+            
+            # Extract detailed module information
+            detailed_modules = extract_detailed_modules_from_structured_content(structured_content)
+            
+            # Get original module information for backward compatibility
             modules = extract_modules_from_structured_content(structured_content)
+            
             key_files = extract_key_files_from_structured_content(structured_content)
             class_hierarchies = extract_class_hierarchies(structured_content)
             repo_structure = []
         else:
-            repo_structure = fetch_repo_structure(owner, repo, max_depth=1)
+            repo_structure = fetch_repo_structure(owner, repo, max_depth=3)  # Increased depth for better overview
+            tree_structure = {}
             
             module_names = []
             for item in repo_structure:
                 if item.get("type") == "dir" and item.get("name", "").lower() in ["src", "source", "lib"]:
-                    src_content = fetch_repo_structure(owner, repo, item.get("path", ""), max_depth=0)
+                    src_content = fetch_repo_structure(owner, repo, item.get("path", ""), max_depth=1)
                     module_names = [sub.get("name", "") for sub in src_content if sub.get("type") == "dir"]
                     break
             
@@ -276,9 +520,11 @@ def generate_repo_summary(repo_config):
                         "interfaces": []
                     })
             
+            detailed_modules = []
             key_files = []
             class_hierarchies = {}
         
+        # Create summary with enhanced information
         summary = {
             "name": name,
             "url": repo_url,
@@ -295,7 +541,9 @@ def generate_repo_summary(repo_config):
                 "license": metadata.get("license", {}).get("name", "Unknown")
             },
             "readme_content": readme,
-            "modules": [module_info["name"] for module_info in modules]
+            "modules": [module_info["name"] for module_info in modules],
+            "detailed_modules": detailed_modules,
+            "tree_structure": tree_structure
         }
         
         if repo_structure:
@@ -317,8 +565,37 @@ def generate_repo_summary(repo_config):
                     if subclasses:
                         class_hierarchy_for_prompt += f"- {base_class}: Extended by {', '.join(subclasses)}\n"
             
+            # Enhanced modules for prompt with more detailed information
             modules_for_prompt = ""
-            if modules:
+            if detailed_modules:
+                modules_for_prompt = "\nDetailed Modules/Components:\n"
+                for module_info in detailed_modules:
+                    module_name = module_info["name"]
+                    description = module_info["description"] if module_info["description"] else "No description available"
+                    
+                    additional_info = ""
+                    if module_info.get("key_classes", []):
+                        additional_info += f"\n  - Key Classes: {', '.join(module_info['key_classes'][:5])}"
+                        if len(module_info['key_classes']) > 5:
+                            additional_info += f" and {len(module_info['key_classes']) - 5} more"
+                    
+                    if module_info.get("interfaces", []):
+                        additional_info += f"\n  - Interfaces: {', '.join(module_info['interfaces'][:5])}"
+                        if len(module_info['interfaces']) > 5:
+                            additional_info += f" and {len(module_info['interfaces']) - 5} more"
+                    
+                    if module_info.get("dependencies", []):
+                        additional_info += f"\n  - Dependencies: {', '.join(module_info['dependencies'][:5])}"
+                        if len(module_info['dependencies']) > 5:
+                            additional_info += f" and {len(module_info['dependencies']) - 5} more"
+                    
+                    if module_info.get("important_files", []):
+                        additional_info += f"\n  - Important Files: {', '.join(module_info['important_files'][:5])}"
+                        if len(module_info['important_files']) > 5:
+                            additional_info += f" and {len(module_info['important_files']) - 5} more"
+                    
+                    modules_for_prompt += f"- {module_name}: {description}{additional_info}\n"
+            elif modules:
                 modules_for_prompt = "\nModules/Components:\n"
                 for module_info in modules:
                     module_name = module_info["name"]
@@ -463,6 +740,29 @@ def get_formatted_repo_summaries():
     for name, summary in summaries.items():
         formatted_text += f"## {name}\n\n"
         
+        # Add full repository structure information
+        if "tree_structure" in summary and summary["tree_structure"]:
+            formatted_text += "### Repository Structure\n\n"
+            formatted_text += "The repository has the following structure:\n\n"
+            
+            # Format the tree structure into a readable format
+            def format_tree(tree, indent=0):
+                tree_text = ""
+                for name, item in tree.items():
+                    if isinstance(item, dict):
+                        item_type = item.get("type", "unknown")
+                        if item_type == "dir":
+                            tree_text += f"{'  ' * indent}📁 {name}/\n"
+                            if "contents" in item and item["contents"]:
+                                tree_text += format_tree(item["contents"], indent + 1)
+                        elif item_type == "file":
+                            tree_text += f"{'  ' * indent}📄 {name}\n"
+                return tree_text
+            
+            # Only show top-level directories and selected subdirectories to avoid overwhelming
+            tree_text = format_tree(summary.get("tree_structure", {}))
+            formatted_text += f"```\n{tree_text}\n```\n\n"
+        
         if "generated_summary" in summary and summary["generated_summary"]:
             formatted_text += summary["generated_summary"] + "\n\n"
         else:
@@ -473,6 +773,31 @@ def get_formatted_repo_summaries():
             if topics:
                 formatted_text += f"- **Topics**: {', '.join(topics)}\n"
             formatted_text += "\n"
+        
+        # Add section for detailed modules
+        if "detailed_modules" in summary and summary["detailed_modules"]:
+            formatted_text += "### Detailed Module Information\n\n"
+            for module in summary["detailed_modules"]:
+                module_name = module.get("name", "Unknown")
+                formatted_text += f"#### {module_name}\n\n"
+                
+                if module.get("description"):
+                    formatted_text += f"**Description**: {module['description']}\n\n"
+                
+                if module.get("key_classes"):
+                    formatted_text += f"**Key Classes**: {', '.join(module['key_classes'])}\n\n"
+                
+                if module.get("interfaces"):
+                    formatted_text += f"**Interfaces**: {', '.join(module['interfaces'])}\n\n"
+                
+                if module.get("dependencies"):
+                    formatted_text += f"**Dependencies**: {', '.join(module['dependencies'])}\n\n"
+                
+                if module.get("important_files"):
+                    formatted_text += f"**Important Files**: {', '.join(module['important_files'])}\n\n"
+                
+                if module.get("usage_examples"):
+                    formatted_text += "**Usage Example**:\n```\n" + module['usage_examples'][0] + "\n```\n\n"
     
     return formatted_text
 
